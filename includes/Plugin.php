@@ -30,8 +30,11 @@ final class Plugin {
         require_once AIE_DIR . 'includes/Admin/SettingsPage.php';
         require_once AIE_DIR . 'includes/Api/RestController.php';
         require_once AIE_DIR . 'includes/Elementor/DataManager.php';
+        require_once AIE_DIR . 'includes/AI/ClaudeClient.php';
         require_once AIE_DIR . 'includes/AI/GroqClient.php';
         require_once AIE_DIR . 'includes/AI/PromptBuilder.php';
+        require_once AIE_DIR . 'includes/AI/TemplateLibrary.php';
+        require_once AIE_DIR . 'includes/AI/TemplateAssembler.php';
     }
 
     private function init_hooks(): void {
