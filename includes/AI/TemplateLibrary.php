@@ -39,7 +39,8 @@ class TemplateLibrary {
      * }
      */
     public static function hero_split( array $c ): array {
-        $img = 'https://picsum.photos/seed/' . sanitize_key( $c['image_seed'] ?? 'hero-image' ) . '/750/620';
+        $keywords = $c['image_seed'] ?? 'professional,business,team';
+        $img = 'https://loremflickr.com/750/620/' . rawurlencode( $keywords );
 
         return [
             'id'      => self::id(),
@@ -381,7 +382,8 @@ class TemplateLibrary {
      * }
      */
     public static function about_2col( array $c ): array {
-        $img = 'https://picsum.photos/seed/' . sanitize_key( $c['image_seed'] ?? 'about-team' ) . '/700/560';
+        $keywords = $c['image_seed'] ?? 'professional,office,team';
+        $img = 'https://loremflickr.com/700/560/' . rawurlencode( $keywords );
 
         $benefits = [
             [ 'text' => $c['benefit_1'] ?? 'Benefit 1', 'icon' => [ 'value' => 'fas fa-check-circle', 'library' => 'fa-solid' ] ],
@@ -707,7 +709,7 @@ class TemplateLibrary {
 
         $cards = [];
         foreach ( $tests as $t ) {
-            $avatar = 'https://picsum.photos/seed/' . sanitize_key( $t['seed'] ) . '/120/120';
+            $avatar = 'https://loremflickr.com/120/120/' . rawurlencode( $t['seed'] );
             $cards[] = [
                 'id'      => self::id(),
                 'elType'  => 'container',

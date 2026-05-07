@@ -2,8 +2,9 @@
 /**
  * REST API végpont: /wp-json/ai-builder/v1/generate
  *
- * Egylépéses flow: prompt (+ referencia példák) → AI → teljes Elementor JSON → mentés.
- * Provider: Claude (ajánlott) vagy Groq (tartalék).
+ * Create flow: plan call → N section calls → combine
+ * Modify flow: single call with existing JSON
+ * Provider: Claude (recommended) or Groq (fallback).
  *
  * @package AIE\Api
  */
@@ -24,6 +25,16 @@ class RestController {
 
     private const NAMESPACE = 'ai-builder/v1';
     private const ROUTE     = '/generate';
+
+    private const VALID_SECTION_TYPES = [
+        'hero-split', 'features-3', 'stats-4', 'about-2col',
+        'process-3steps', 'testimonials-3', 'pricing-3', 'faq', 'cta-dark',
+    ];
+
+    private const DEFAULT_PLAN = [
+        'hero-split', 'features-3', 'stats-4', 'about-2col',
+        'process-3steps', 'testimonials-3', 'faq', 'cta-dark',
+    ];
 
     public function register_routes(): void {
         register_rest_route( self::NAMESPACE, self::ROUTE, [
@@ -86,45 +97,31 @@ class RestController {
         $prompt  = (string) $request->get_param( 'prompt' );
         $mode    = (string) $request->get_param( 'mode' );
 
-        // ── 1. Elementor adatok ───────────────────────────────────────────────
         $data_manager  = new DataManager();
         $current_json  = $data_manager->get_elementor_data( $post_id );
         $global_styles = $data_manager->get_global_styles();
 
-        // ── 2. Mód ───────────────────────────────────────────────────────────
         if ( 'auto' === $mode ) {
             $mode = ( ! empty( $current_json ) && '[]' !== $current_json ) ? 'modify' : 'create';
         }
 
-        // ── 3. Prompt összeállítása ───────────────────────────────────────────
-        $prompt_builder = new PromptBuilder();
-        $messages       = $prompt_builder->build( $mode, $prompt, $current_json, $global_styles );
+        $new_data = ( 'modify' === $mode )
+            ? $this->run_modify( $prompt, $current_json, $global_styles )
+            : $this->run_create( $prompt, $global_styles );
 
-        // ── 4. AI hívás ───────────────────────────────────────────────────────
-        $settings = (array) get_option( AIE_OPTION_KEY, [] );
-        $provider = $settings['ai_provider'] ?? 'claude';
-
-        $ai_raw = ( 'groq' === $provider )
-            ? ( new GroqClient() )->chat( $messages )
-            : ( new ClaudeClient() )->chat( $messages );
-
-        if ( is_wp_error( $ai_raw ) ) {
-            return $ai_raw;
-        }
-
-        // ── 5. JSON validálás ─────────────────────────────────────────────────
-        $new_data = $this->parse_elementor_json( $ai_raw );
         if ( is_wp_error( $new_data ) ) {
             return $new_data;
         }
 
-        // ── 6. Mentés ─────────────────────────────────────────────────────────
         $save_result = $data_manager->save_elementor_data( $post_id, $new_data );
         if ( is_wp_error( $save_result ) ) {
             return $save_result;
         }
 
         $data_manager->clear_elementor_cache( $post_id );
+
+        $settings = (array) get_option( AIE_OPTION_KEY, [] );
+        $provider = $settings['ai_provider'] ?? 'claude';
 
         return new WP_REST_Response( [
             'success'        => true,
@@ -135,7 +132,197 @@ class RestController {
         ], 200 );
     }
 
-    // ── JSON sanitálás ────────────────────────────────────────────────────────
+    // ── Create: plan + per-section calls ─────────────────────────────────────
+
+    private function run_create( string $prompt, array $global_styles ): array|WP_Error {
+        $settings = (array) get_option( AIE_OPTION_KEY, [] );
+        $has_pro  = defined( 'ELEMENTOR_PRO_VERSION' );
+
+        $prompt_builder = new PromptBuilder();
+
+        // Step 1: plan — small response, low token budget
+        $plan_messages = $prompt_builder->build_plan( $prompt );
+        $plan_raw      = $this->ai_call( $plan_messages, 256 );
+        if ( is_wp_error( $plan_raw ) ) {
+            // Soft-fail: use default plan
+            $section_types = self::DEFAULT_PLAN;
+        } else {
+            $section_types = $this->parse_plan( $plan_raw );
+            if ( empty( $section_types ) ) {
+                $section_types = self::DEFAULT_PLAN;
+            }
+        }
+
+        // Step 2: generate each section individually
+        $sections = [];
+        foreach ( $section_types as $section_type ) {
+            $messages = $prompt_builder->build_section( $section_type, $prompt, $global_styles, $has_pro );
+            $raw      = $this->ai_call( $messages, 0 );
+            if ( is_wp_error( $raw ) ) {
+                // Skip failed sections rather than aborting
+                continue;
+            }
+            $section = $this->parse_single_section( $raw );
+            if ( null !== $section ) {
+                $sections[] = $section;
+            }
+        }
+
+        if ( empty( $sections ) ) {
+            return new WP_Error(
+                'aie_generation_failed',
+                __( 'Az AI nem tudott egyetlen szekciót sem generálni. Próbálj újra.', 'ai-elementor-builder' ),
+                [ 'status' => 422 ]
+            );
+        }
+
+        return $sections;
+    }
+
+    // ── Modify: single AI call ────────────────────────────────────────────────
+
+    private function run_modify( string $prompt, string $current_json, array $global_styles ): array|WP_Error {
+        $prompt_builder = new PromptBuilder();
+        $messages       = $prompt_builder->build_modify( $prompt, $current_json, $global_styles );
+
+        $raw = $this->ai_call( $messages, 0 );
+        if ( is_wp_error( $raw ) ) {
+            return $raw;
+        }
+
+        return $this->parse_elementor_json( $raw );
+    }
+
+    // ── AI hívás ─────────────────────────────────────────────────────────────
+
+    private function ai_call( array $messages, int $max_tokens = 0 ): string|WP_Error {
+        $settings = (array) get_option( AIE_OPTION_KEY, [] );
+        $provider = $settings['ai_provider'] ?? 'claude';
+
+        return ( 'groq' === $provider )
+            ? ( new GroqClient() )->chat( $messages, $max_tokens )
+            : ( new ClaudeClient() )->chat( $messages, $max_tokens );
+    }
+
+    // ── Plan parsing ──────────────────────────────────────────────────────────
+
+    private function parse_plan( string $raw ): array {
+        $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $raw );
+        $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
+        $cleaned = trim( $cleaned );
+
+        // Find the JSON array
+        $start = strpos( $cleaned, '[' );
+        $end   = strrpos( $cleaned, ']' );
+        if ( false === $start || false === $end || $end <= $start ) {
+            return [];
+        }
+
+        $json    = substr( $cleaned, $start, $end - $start + 1 );
+        $decoded = json_decode( $json, true );
+
+        if ( ! is_array( $decoded ) ) {
+            return [];
+        }
+
+        // Filter to only valid section types, remove duplicates
+        $valid = [];
+        $seen  = [];
+        foreach ( $decoded as $type ) {
+            if ( is_string( $type ) && in_array( $type, self::VALID_SECTION_TYPES, true ) && ! isset( $seen[ $type ] ) ) {
+                $valid[]       = $type;
+                $seen[ $type ] = true;
+            }
+        }
+
+        // Enforce 7–9 sections
+        if ( count( $valid ) < 3 ) {
+            return [];
+        }
+        if ( count( $valid ) > 9 ) {
+            $valid = array_slice( $valid, 0, 9 );
+        }
+
+        return $valid;
+    }
+
+    // ── Single section parsing ────────────────────────────────────────────────
+
+    private function parse_single_section( string $raw ): ?array {
+        $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $raw );
+        $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
+        $cleaned = trim( $cleaned );
+
+        $cleaned = $this->fix_json_control_chars( $cleaned );
+        $cleaned = preg_replace( '/,\s*([\}\]])/', '$1', $cleaned );
+
+        $decoded = json_decode( $cleaned, true );
+
+        if ( JSON_ERROR_NONE !== json_last_error() ) {
+            $decoded = $this->extract_json_object( $cleaned );
+        }
+
+        if ( ! is_array( $decoded ) || empty( $decoded['elType'] ) ) {
+            return null;
+        }
+
+        return $decoded;
+    }
+
+    // ── Full-page JSON parsing (used in modify mode) ──────────────────────────
+
+    private function parse_elementor_json( string $ai_raw ): array|WP_Error {
+        $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $ai_raw );
+        $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
+        $cleaned = trim( $cleaned );
+
+        $cleaned = $this->fix_json_control_chars( $cleaned );
+        $cleaned = preg_replace( '/,\s*([\}\]])/', '$1', $cleaned );
+
+        $decoded = json_decode( $cleaned, true );
+
+        if ( JSON_ERROR_NONE !== json_last_error() ) {
+            $decoded = $this->extract_json_object( $cleaned );
+        }
+
+        if ( null === $decoded ) {
+            $sections = $this->recover_truncated_sections( $cleaned );
+            if ( ! empty( $sections ) ) {
+                $decoded = $sections;
+            }
+        }
+
+        if ( null === $decoded ) {
+            return new WP_Error(
+                'aie_json_parse_error',
+                __( 'Az AI nem adott vissza értelmezhető JSON-t. Próbálj újra vagy használj rövidebb promptot.', 'ai-elementor-builder' ),
+                [ 'status' => 422 ]
+            );
+        }
+
+        if ( isset( $decoded['elementor_data'] ) && is_array( $decoded['elementor_data'] ) ) {
+            $decoded = $decoded['elementor_data'];
+        }
+
+        if ( ! is_array( $decoded ) || empty( $decoded ) ) {
+            return new WP_Error( 'aie_json_empty', __( 'Az AI üres oldalt generált. Próbálj újra.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
+        }
+
+        $allowed = [ 'section', 'container' ];
+        foreach ( $decoded as $element ) {
+            if ( empty( $element['elType'] ) || ! in_array( $element['elType'], $allowed, true ) ) {
+                return new WP_Error(
+                    'aie_invalid_structure',
+                    __( 'Az AI érvénytelen Elementor struktúrát generált. Próbálj újra.', 'ai-elementor-builder' ),
+                    [ 'status' => 422 ]
+                );
+            }
+        }
+
+        return $decoded;
+    }
+
+    // ── JSON javítók ─────────────────────────────────────────────────────────
 
     /**
      * Literal vezérlőkaraktereket escape-el JSON string literálokon belül.
@@ -169,7 +356,6 @@ class RestController {
                 continue;
             }
 
-            // Vezérlőkarakter string belsejében → escape-elés
             if ( $in_string && $ord < 0x20 ) {
                 switch ( $char ) {
                     case "\n": $result .= '\\n'; break;
@@ -186,71 +372,6 @@ class RestController {
         return $result;
     }
 
-    // ── JSON validálás + javítás ──────────────────────────────────────────────
-
-    private function parse_elementor_json( string $ai_raw ): array|WP_Error {
-        // 1. Markdown kódblokk eltávolítása
-        $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $ai_raw );
-        $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
-        $cleaned = trim( $cleaned );
-
-        // 2. Vezérlőkarakter-javítás string literálokon belül
-        $cleaned = $this->fix_json_control_chars( $cleaned );
-
-        // 3. Trailing comma javítás (},  } vagy ],  ] előtt)
-        $cleaned = preg_replace( '/,\s*([\}\]])/', '$1', $cleaned );
-
-        // 4. Direkt parse megkísérlete
-        $decoded = json_decode( $cleaned, true );
-
-        // 5. Ha sikertelen → megpróbálunk kinyerni a JSON objektumot
-        if ( JSON_ERROR_NONE !== json_last_error() ) {
-            $decoded = $this->extract_json_object( $cleaned );
-        }
-
-        // 6. Ha még mindig sikertelen → truncation recovery (csonkított válasz)
-        if ( null === $decoded ) {
-            $sections = $this->recover_truncated_sections( $cleaned );
-            if ( ! empty( $sections ) ) {
-                $decoded = $sections;
-            }
-        }
-
-        if ( null === $decoded ) {
-            return new WP_Error(
-                'aie_json_parse_error',
-                __( 'Az AI nem adott vissza értelmezhető JSON-t. Próbálj újra vagy használj rövidebb promptot.', 'ai-elementor-builder' ),
-                [ 'status' => 422 ]
-            );
-        }
-
-        // 7. {"elementor_data": [...]} wrapper kibontása
-        if ( isset( $decoded['elementor_data'] ) && is_array( $decoded['elementor_data'] ) ) {
-            $decoded = $decoded['elementor_data'];
-        }
-
-        if ( ! is_array( $decoded ) || empty( $decoded ) ) {
-            return new WP_Error( 'aie_json_empty', __( 'Az AI üres oldalt generált. Próbálj újra.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
-        }
-
-        // 8. Root elemek ellenőrzése
-        $allowed = [ 'section', 'container' ];
-        foreach ( $decoded as $element ) {
-            if ( empty( $element['elType'] ) || ! in_array( $element['elType'], $allowed, true ) ) {
-                return new WP_Error(
-                    'aie_invalid_structure',
-                    __( 'Az AI érvénytelen Elementor struktúrát generált. Próbálj újra.', 'ai-elementor-builder' ),
-                    [ 'status' => 422 ]
-                );
-            }
-        }
-
-        return $decoded;
-    }
-
-    /**
-     * Megkeresi az első teljes JSON objektumot a szövegben.
-     */
     private function extract_json_object( string $text ): ?array {
         $start = strpos( $text, '{' );
         if ( false === $start ) return null;
@@ -262,11 +383,11 @@ class RestController {
 
         for ( $i = $start; $i < $len; $i++ ) {
             $char = $text[ $i ];
-            if ( $escaped )               { $escaped = false; continue; }
+            if ( $escaped )                    { $escaped = false; continue; }
             if ( '\\' === $char && $in_string ) { $escaped = true; continue; }
-            if ( '"' === $char )          { $in_string = ! $in_string; continue; }
-            if ( $in_string )             { continue; }
-            if ( '{' === $char )          { $depth++; }
+            if ( '"' === $char )               { $in_string = ! $in_string; continue; }
+            if ( $in_string )                  { continue; }
+            if ( '{' === $char )               { $depth++; }
             if ( '}' === $char ) {
                 $depth--;
                 if ( 0 === $depth ) {
@@ -279,12 +400,7 @@ class RestController {
         return null;
     }
 
-    /**
-     * Csonkított válaszból kinyeri a befejezett root container elemeket.
-     * Ha a JSON félbeszakadt (max_tokens limit), az eddig kész szekciók menthetők.
-     */
     private function recover_truncated_sections( string $text ): ?array {
-        // Megkeressük az elementor_data tömb kezdetét
         $array_start = false;
 
         $ed_pos = strpos( $text, '"elementor_data"' );
@@ -301,7 +417,6 @@ class RestController {
         $len       = strlen( $text );
 
         while ( $i < $len ) {
-            // Következő '{' keresése (root section kezdete)
             while ( $i < $len && '{' !== $text[ $i ] ) { $i++; }
             if ( $i >= $len ) break;
 
@@ -312,9 +427,9 @@ class RestController {
 
             for ( ; $i < $len; $i++ ) {
                 $c = $text[ $i ];
-                if ( $esc )                { $esc = false; continue; }
+                if ( $esc )                 { $esc = false; continue; }
                 if ( '\\' === $c && $in_str ) { $esc = true; continue; }
-                if ( '"' === $c )          { $in_str = ! $in_str; continue; }
+                if ( '"' === $c )           { $in_str = ! $in_str; continue; }
                 if ( $in_str )             { continue; }
                 if ( '{' === $c )          { $depth++; }
                 if ( '}' === $c ) {

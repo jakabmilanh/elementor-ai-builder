@@ -31,9 +31,11 @@ class GroqClient {
      * Chat Completions hívás.
      *
      * @param  array<int, array{role: string, content: string}> $messages
+     * @param  int    $max_tokens  Ha 0, settings értéket használja.
      * @return string|WP_Error  Az AI nyers szöveges válasza vagy hiba.
      */
-    public function chat( array $messages ): string|WP_Error {
+    public function chat( array $messages, int $max_tokens = 0 ): string|WP_Error {
+        $tokens = $max_tokens > 0 ? $max_tokens : $this->max_tokens;
         if ( empty( $this->api_key ) ) {
             return new WP_Error(
                 'aie_no_api_key',
@@ -45,7 +47,7 @@ class GroqClient {
         $body = wp_json_encode( [
             'model'           => $this->model,
             'messages'        => $messages,
-            'max_tokens'      => $this->max_tokens,
+            'max_tokens'      => $tokens,
             'temperature'     => 0.3,
             'response_format' => [ 'type' => 'json_object' ],
         ] );
