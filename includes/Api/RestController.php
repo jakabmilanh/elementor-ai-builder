@@ -9,7 +9,7 @@ namespace AIE\Api;
 
 defined( 'ABSPATH' ) || exit;
 
-use AIE\AI\OpenAIClient;
+use AIE\AI\GeminiClient;
 use AIE\AI\PromptBuilder;
 use AIE\Elementor\DataManager;
 use WP_REST_Request;
@@ -131,9 +131,9 @@ class RestController {
             global_styles:  $global_styles,
         );
 
-        // ── 4. OpenAI hívás ───────────────────────────────────────────────────
-        $openai  = new OpenAIClient();
-        $ai_result = $openai->chat( $messages );
+        // ── 4. Gemini hívás ───────────────────────────────────────────────────
+        $gemini    = new GeminiClient();
+        $ai_result = $gemini->chat( $messages );
 
         if ( is_wp_error( $ai_result ) ) {
             return $ai_result;

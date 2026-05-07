@@ -30,7 +30,7 @@ final class Plugin {
         require_once AIE_DIR . 'includes/Admin/SettingsPage.php';
         require_once AIE_DIR . 'includes/Api/RestController.php';
         require_once AIE_DIR . 'includes/Elementor/DataManager.php';
-        require_once AIE_DIR . 'includes/AI/OpenAIClient.php';
+        require_once AIE_DIR . 'includes/AI/GeminiClient.php';
         require_once AIE_DIR . 'includes/AI/PromptBuilder.php';
     }
 

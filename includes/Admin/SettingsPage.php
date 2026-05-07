@@ -38,13 +38,13 @@ class SettingsPage {
 
         add_settings_section(
             'aie_main_section',
-            __( 'OpenAI API Beállítások', 'ai-elementor-builder' ),
+            __( 'Google Gemini API Beállítások', 'ai-elementor-builder' ),
             null,
             self::PAGE_SLUG
         );
 
         add_settings_field(
-            'openai_api_key',
+            'gemini_api_key',
             __( 'API Kulcs', 'ai-elementor-builder' ),
             [ $this, 'render_api_key_field' ],
             self::PAGE_SLUG,
@@ -52,7 +52,7 @@ class SettingsPage {
         );
 
         add_settings_field(
-            'openai_model',
+            'gemini_model',
             __( 'Model', 'ai-elementor-builder' ),
             [ $this, 'render_model_field' ],
             self::PAGE_SLUG,
@@ -70,9 +70,9 @@ class SettingsPage {
 
     public function sanitize_settings( array $input ): array {
         return [
-            'openai_api_key' => sanitize_text_field( $input['openai_api_key'] ?? '' ),
-            'openai_model'   => sanitize_text_field( $input['openai_model']   ?? 'gpt-4o' ),
-            'max_tokens'     => min( 8192, max( 512, (int) ( $input['max_tokens'] ?? 4096 ) ) ),
+            'gemini_api_key' => sanitize_text_field( $input['gemini_api_key'] ?? '' ),
+            'gemini_model'   => sanitize_text_field( $input['gemini_model']   ?? 'gemini-2.0-flash' ),
+            'max_tokens'     => min( 8192, max( 512, (int) ( $input['max_tokens'] ?? 8192 ) ) ),
         ];
     }
 
@@ -85,9 +85,9 @@ class SettingsPage {
         <div class="wrap">
             <h1><?php esc_html_e( 'AI Elementor Builder – Beállítások', 'ai-elementor-builder' ); ?></h1>
 
-            <?php if ( empty( $settings['openai_api_key'] ) ) : ?>
+            <?php if ( empty( $settings['gemini_api_key'] ) ) : ?>
             <div class="notice notice-warning">
-                <p><?php esc_html_e( 'Kérjük, add meg az OpenAI API kulcsot a plugin működéséhez.', 'ai-elementor-builder' ); ?></p>
+                <p><?php esc_html_e( 'Kérjük, add meg a Google Gemini API kulcsot a plugin működéséhez.', 'ai-elementor-builder' ); ?></p>
             </div>
             <?php endif; ?>
 
@@ -110,21 +110,21 @@ class SettingsPage {
 
     public function render_api_key_field(): void {
         $settings = (array) get_option( AIE_OPTION_KEY, [] );
-        $value    = $settings['openai_api_key'] ?? '';
+        $value    = $settings['gemini_api_key'] ?? '';
         printf(
-            '<input type="password" name="%s[openai_api_key]" value="%s" class="regular-text" autocomplete="new-password">
+            '<input type="password" name="%s[gemini_api_key]" value="%s" class="regular-text" autocomplete="new-password">
              <p class="description">%s</p>',
             esc_attr( AIE_OPTION_KEY ),
             esc_attr( $value ),
-            esc_html__( 'OpenAI platform.openai.com/api-keys oldalon generálható.', 'ai-elementor-builder' )
+            esc_html__( 'Google AI Studio – aistudio.google.com/app/apikey oldalon generálható (ingyenes).', 'ai-elementor-builder' )
         );
     }
 
     public function render_model_field(): void {
         $settings = (array) get_option( AIE_OPTION_KEY, [] );
-        $current  = $settings['openai_model'] ?? 'gpt-4o';
-        $models   = [ 'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo' ];
-        echo '<select name="' . esc_attr( AIE_OPTION_KEY ) . '[openai_model]">';
+        $current  = $settings['gemini_model'] ?? 'gemini-2.0-flash';
+        $models   = [ 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash' ];
+        echo '<select name="' . esc_attr( AIE_OPTION_KEY ) . '[gemini_model]">';
         foreach ( $models as $model ) {
             printf(
                 '<option value="%s" %s>%s</option>',
@@ -134,7 +134,7 @@ class SettingsPage {
             );
         }
         echo '</select>';
-        echo '<p class="description">' . esc_html__( 'Ajánlott: gpt-4o (legjobb minőség + JSON mód).', 'ai-elementor-builder' ) . '</p>';
+        echo '<p class="description">' . esc_html__( 'Ajánlott: gemini-2.0-flash (gyors, ingyenes kvóta elérhető).', 'ai-elementor-builder' ) . '</p>';
     }
 
     public function render_max_tokens_field(): void {

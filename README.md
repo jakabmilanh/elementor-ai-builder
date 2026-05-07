@@ -1,6 +1,6 @@
 # AI Elementor Builder
 
-WordPress plugin, amely OpenAI GPT-4 segítségével generál és módosít Elementor oldalakat természetes nyelvű promptokból.
+WordPress plugin, amely Google Gemini segítségével generál és módosít Elementor oldalakat természetes nyelvű promptokból.
 
 ---
 
@@ -15,13 +15,26 @@ WordPress plugin, amely OpenAI GPT-4 segítségével generál és módosít Elem
 
 ---
 
+## Gemini API kulcs megszerzése
+
+1. Menj a [Google AI Studio](https://aistudio.google.com/app/apikey) oldalra (`aistudio.google.com/app/apikey`)
+2. Jelentkezz be Google fiókoddal
+3. Kattints a **„Create API key"** gombra
+4. Válassz egy Google Cloud projektet (vagy hozz létre újat)
+5. Másold ki a generált kulcsot – **csak egyszer látható**, mentsd el biztonságos helyre!
+6. A kulcsot illeszd be a **Beállítások → AI Elementor Builder → API Kulcs** mezőbe
+
+> **Ingyenes kvóta:** A `gemini-2.0-flash` modell ingyenes szinten is elérhető (napi korláttal). Részletek: [ai.google.dev/pricing](https://ai.google.dev/pricing)
+
+---
+
 ## Telepítés
 
 1. Töltsd fel a `ai-elementor-builder` mappát a `/wp-content/plugins/` könyvtárba
 2. Aktiváld a plugint a WordPress admin felületen
 3. Lépj a **Beállítások → AI Elementor Builder** menüpontra
-4. Add meg az OpenAI API kulcsot ([platform.openai.com/api-keys](https://platform.openai.com/api-keys))
-5. Válassz modellt (ajánlott: `gpt-4o`)
+4. Add meg a Gemini API kulcsot (lásd fent – [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey))
+5. Válassz modellt (ajánlott: `gemini-2.0-flash`)
 
 ---
 
@@ -30,7 +43,7 @@ WordPress plugin, amely OpenAI GPT-4 segítségével generál és módosít Elem
 - WordPress 6.0+
 - PHP 8.0+
 - Elementor 3.x+
-- OpenAI API kulcs (fizetős)
+- Google Gemini API kulcs (ingyenes kvóta elérhető)
 - cURL PHP extension
 
 ---
@@ -89,7 +102,7 @@ ai-elementor-builder/
     ├── Elementor/
     │   └── DataManager.php           # _elementor_data + Kit
     └── AI/
-        ├── OpenAIClient.php          # cURL OpenAI kliens
+        ├── GeminiClient.php          # cURL Gemini kliens
         └── PromptBuilder.php         # System + user prompt
 ```
 
@@ -112,7 +125,7 @@ A REST endpoint az alábbi rétegeket ellenőrzi:
 
 ### Miért nem használ Guzzle-t?
 
-A WordPress core önmagában nem szállít Composer autoloader-t. Hogy a plugin függőség-mentes legyen, **natív cURL** hívást használ. Aki Guzzle-t szeretne, a `OpenAIClient::chat()` metódus belsejét cserélheti le ~10 sorra (lásd alább).
+A WordPress core önmagában nem szállít Composer autoloader-t. Hogy a plugin függőség-mentes legyen, **natív cURL** hívást használ. Aki Guzzle-t szeretne, a `GeminiClient::chat()` metódus belsejét cserélheti le.
 
 ### JSON mentés Elementor-kompatibilis módon
 
@@ -128,7 +141,7 @@ Ha ezt kihagyod (pl. csak `update_post_meta`-val mented), az Elementor **escape 
 
 ### Prompt engineering trükkök
 
-- **`response_format: json_object`** – GPT-4o-ban garantálja a parse-olható JSON-t
+- **`responseMimeType: application/json`** – Gemini JSON módban garantálja a parse-olható JSON-t
 - **Hőmérséklet 0.3** – Kevesebb kreativitás = stabilabb struktúra
 - **System promptban explicit példák** – Heading, text, button widget JSON sablonok
 - **Globális színek átadása** – Az AI így nem talál ki random hex kódokat
@@ -140,48 +153,15 @@ Ha a meglévő JSON > 12 000 karakter, a `PromptBuilder::maybe_truncate_json()` 
 
 ---
 
-## Guzzle alternatíva (opcionális)
-
-Ha Composer-es projektben dolgozol és Guzzle-t szeretnél:
-
-```php
-use GuzzleHttp\Client;
-use GuzzleHttp\Exception\GuzzleException;
-
-$client = new Client( [ 'timeout' => 120 ] );
-
-try {
-    $response = $client->post( 'https://api.openai.com/v1/chat/completions', [
-        'headers' => [
-            'Authorization' => 'Bearer ' . $this->api_key,
-            'Content-Type'  => 'application/json',
-        ],
-        'json' => [
-            'model'           => $this->model,
-            'messages'        => $messages,
-            'max_tokens'      => $this->max_tokens,
-            'temperature'     => 0.3,
-            'response_format' => [ 'type' => 'json_object' ],
-        ],
-    ] );
-
-    $body = json_decode( (string) $response->getBody(), true );
-    return $body['choices'][0]['message']['content'] ?? '';
-
-} catch ( GuzzleException $e ) {
-    return new WP_Error( 'aie_guzzle_error', $e->getMessage() );
-}
-```
-
 ---
 
 ## Hibaelhárítás
 
 | Hiba                          | Megoldás                                          |
 |-------------------------------|---------------------------------------------------|
-| `aie_no_api_key`              | Add meg az API kulcsot a beállításokban           |
-| `aie_json_parse_error`        | Az AI érvénytelen JSON-t adott – próbáld újra, vagy használj `gpt-4o`-t |
-| `aie_curl_error`              | Tűzfal/SSL probléma – ellenőrizd az `api.openai.com` elérhetőségét |
+| `aie_no_api_key`              | Add meg a Gemini API kulcsot a beállításokban     |
+| `aie_json_parse_error`        | Az AI érvénytelen JSON-t adott – próbáld újra    |
+| `aie_curl_error`              | Tűzfal/SSL probléma – ellenőrizd a `generativelanguage.googleapis.com` elérhetőségét |
 | Az oldal nem frissül          | `Elementor → Eszközök → Cache regenerálása`       |
 | `403 forbidden_post`          | A felhasználónak nincs joga az oldalhoz           |
 
@@ -195,9 +175,9 @@ GPL-2.0+
 
 ## Roadmap
 
-- [ ] Anthropic Claude támogatás (paritás OpenAI-jal)
+- [ ] Anthropic Claude támogatás
 - [ ] Több prompt template (landing page, blog post, portfolio…)
 - [ ] Undo/redo előzmények tárolása
 - [ ] Streaming válasz (Server-Sent Events)
 - [ ] Multi-language prompt detection
-- [ ] Képgenerálás (DALL-E 3) az image widgetekhez
+- [ ] Képgenerálás az image widgetekhez (Gemini Imagen)
