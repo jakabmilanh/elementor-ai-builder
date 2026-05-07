@@ -197,12 +197,23 @@ class RestController {
             );
         }
 
-        // Minimális struktúra-ellenőrzés: minden elemnek section típusúnak kell lennie
-        foreach ( $decoded as $section ) {
-            if ( empty( $section['elType'] ) ) {
+        // Struktúra-ellenőrzés: a root elemek csak section vagy container lehetnek (Elementor 3.30+)
+        $allowed_root = [ 'section', 'container' ];
+        foreach ( $decoded as $element ) {
+            if ( empty( $element['elType'] ) ) {
                 return new WP_Error(
                     'aie_json_missing_eltype',
                     __( 'A JSON egyik eleme hiányos (nincs elType mező).', 'ai-elementor-builder' ),
+                    [ 'status' => 422 ]
+                );
+            }
+            if ( ! in_array( $element['elType'], $allowed_root, true ) ) {
+                return new WP_Error(
+                    'aie_invalid_root_eltype',
+                    sprintf(
+                        __( 'A root elem nem lehet "%s" típusú (csak section vagy container).', 'ai-elementor-builder' ),
+                        $element['elType']
+                    ),
                     [ 'status' => 422 ]
                 );
             }

@@ -40,24 +40,23 @@ final class Plugin {
 
         // Admin settings oldal
         if ( is_admin() ) {
-            add_action( 'admin_menu',    [ new Admin\SettingsPage(), 'register_menu' ] );
-            add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_admin_assets' ] );
+            add_action( 'admin_menu', [ new Admin\SettingsPage(), 'register_menu' ] );
         }
+
+        // ── Elementor editor hook-ok – KÖZVETLENÜL regisztrálva ──────────────
+        // Ezek kellenek, mert az Elementor editor nem standard admin oldal:
+        add_action( 'elementor/editor/after_enqueue_scripts', [ $this, 'enqueue_editor_panel' ] );
+        add_action( 'elementor/editor/footer',                [ $this, 'inject_panel_container' ] );
     }
 
     /**
-     * Admin JS/CSS – az Elementor szerkesztőbe kerülő panel számára is.
+     * Az Elementor editor JS-ének betöltése.
      */
-    public function enqueue_admin_assets( string $hook ): void {
-        // Elementor editor
-        add_action( 'elementor/editor/after_enqueue_scripts', [ $this, 'enqueue_editor_panel' ] );
-    }
-
     public function enqueue_editor_panel(): void {
         wp_enqueue_script(
             'aie-editor-panel',
             AIE_URL . 'assets/js/editor-panel.js',
-            [ 'jquery' ],
+            [ 'jquery', 'elementor-editor' ],
             AIE_VERSION,
             true
         );
@@ -65,7 +64,14 @@ final class Plugin {
         wp_localize_script( 'aie-editor-panel', 'AIEData', [
             'restUrl' => rest_url( 'ai-builder/v1/generate' ),
             'nonce'   => wp_create_nonce( 'wp_rest' ),
-            'postId'  => get_the_ID(),
+            'postId'  => isset( $_GET['post'] ) ? (int) $_GET['post'] : 0,
         ] );
+    }
+
+    /**
+     * Üres div konténer az editor footer-be – a JS ide injektál.
+     */
+    public function inject_panel_container(): void {
+        echo '<div id="aie-panel-mount"></div>';
     }
 }
