@@ -135,12 +135,66 @@ class RestController {
         ], 200 );
     }
 
+    // ── JSON sanitálás ────────────────────────────────────────────────────────
+
+    /**
+     * Literal vezérlőkaraktereket escape-el JSON string literálokon belül.
+     * Claude néha nyers newline/tab karaktereket ír string értékekbe \n helyett.
+     */
+    private function fix_json_control_chars( string $json ): string {
+        $result    = '';
+        $in_string = false;
+        $escaped   = false;
+        $len       = strlen( $json );
+
+        for ( $i = 0; $i < $len; $i++ ) {
+            $char = $json[ $i ];
+            $ord  = ord( $char );
+
+            if ( $escaped ) {
+                $result .= $char;
+                $escaped = false;
+                continue;
+            }
+
+            if ( '\\' === $char && $in_string ) {
+                $result .= $char;
+                $escaped = true;
+                continue;
+            }
+
+            if ( '"' === $char ) {
+                $in_string = ! $in_string;
+                $result   .= $char;
+                continue;
+            }
+
+            // Vezérlőkarakter string belsejében → escape-elés
+            if ( $in_string && $ord < 0x20 ) {
+                switch ( $char ) {
+                    case "\n": $result .= '\\n'; break;
+                    case "\r": $result .= '\\r'; break;
+                    case "\t": $result .= '\\t'; break;
+                    default:   $result .= sprintf( '\\u%04x', $ord ); break;
+                }
+                continue;
+            }
+
+            $result .= $char;
+        }
+
+        return $result;
+    }
+
     // ── JSON validálás ─────────────────────────────────────────────────────────
 
     private function parse_elementor_json( string $ai_raw ): array|WP_Error {
         $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $ai_raw );
         $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
         $cleaned = trim( $cleaned );
+
+        // Fix literal control characters inside JSON string values (Claude sometimes outputs them)
+        $cleaned = $this->fix_json_control_chars( $cleaned );
 
         $decoded = json_decode( $cleaned, true );
 
