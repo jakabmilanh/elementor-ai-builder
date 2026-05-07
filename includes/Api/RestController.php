@@ -2,9 +2,8 @@
 /**
  * REST API végpont: /wp-json/ai-builder/v1/generate
  *
- * Create mód (Claude): kétlépéses flow — page plan → TemplateAssembler → Elementor JSON
- * Create mód (Groq):   egyetlen hívás — közvetlen Elementor JSON generálás
- * Modify mód:          közvetlen JSON módosítás (mindkét provider)
+ * Egylépéses flow: prompt (+ referencia példák) → AI → teljes Elementor JSON → mentés.
+ * Provider: Claude (ajánlott) vagy Groq (tartalék).
  *
  * @package AIE\Api
  */
@@ -16,7 +15,6 @@ defined( 'ABSPATH' ) || exit;
 use AIE\AI\ClaudeClient;
 use AIE\AI\GroqClient;
 use AIE\AI\PromptBuilder;
-use AIE\AI\TemplateAssembler;
 use AIE\Elementor\DataManager;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -88,30 +86,39 @@ class RestController {
         $prompt  = (string) $request->get_param( 'prompt' );
         $mode    = (string) $request->get_param( 'mode' );
 
-        // ── 1. Elementor adatok lekérése ──────────────────────────────────────
+        // ── 1. Elementor adatok ───────────────────────────────────────────────
         $data_manager  = new DataManager();
         $current_json  = $data_manager->get_elementor_data( $post_id );
         $global_styles = $data_manager->get_global_styles();
 
-        // ── 2. Mód meghatározása ──────────────────────────────────────────────
+        // ── 2. Mód ───────────────────────────────────────────────────────────
         if ( 'auto' === $mode ) {
             $mode = ( ! empty( $current_json ) && '[]' !== $current_json ) ? 'modify' : 'create';
         }
 
-        // ── 3. Provider lekérése ──────────────────────────────────────────────
+        // ── 3. Prompt összeállítása ───────────────────────────────────────────
+        $prompt_builder = new PromptBuilder();
+        $messages       = $prompt_builder->build( $mode, $prompt, $current_json, $global_styles );
+
+        // ── 4. AI hívás ───────────────────────────────────────────────────────
         $settings = (array) get_option( AIE_OPTION_KEY, [] );
         $provider = $settings['ai_provider'] ?? 'claude';
 
-        // ── 4. Generálás ──────────────────────────────────────────────────────
-        $new_data = ( 'create' === $mode )
-            ? $this->handle_create( $provider, $prompt, $global_styles )
-            : $this->handle_modify( $provider, $prompt, $current_json, $global_styles );
+        $ai_raw = ( 'groq' === $provider )
+            ? ( new GroqClient() )->chat( $messages )
+            : ( new ClaudeClient() )->chat( $messages, 16000 );
 
+        if ( is_wp_error( $ai_raw ) ) {
+            return $ai_raw;
+        }
+
+        // ── 5. JSON validálás ─────────────────────────────────────────────────
+        $new_data = $this->parse_elementor_json( $ai_raw );
         if ( is_wp_error( $new_data ) ) {
             return $new_data;
         }
 
-        // ── 5. Mentés ─────────────────────────────────────────────────────────
+        // ── 6. Mentés ─────────────────────────────────────────────────────────
         $save_result = $data_manager->save_elementor_data( $post_id, $new_data );
         if ( is_wp_error( $save_result ) ) {
             return $save_result;
@@ -126,67 +133,6 @@ class RestController {
             'message'        => __( 'Az oldal sikeresen generálva/módosítva.', 'ai-elementor-builder' ),
             'elementor_data' => $new_data,
         ], 200 );
-    }
-
-    // ── Create: kétlépéses (Claude) vagy egylépéses (Groq) ───────────────────
-
-    private function handle_create( string $provider, string $prompt, array $global_styles ): array|WP_Error {
-        $prompt_builder = new PromptBuilder();
-
-        if ( 'claude' === $provider ) {
-            // Lépés 1: Claude generál egy kompakt page plan JSON-t
-            $plan_messages = $prompt_builder->build_plan( $prompt, $global_styles );
-            $client        = new ClaudeClient();
-            $plan_raw      = $client->chat( $plan_messages, 4096 );
-
-            if ( is_wp_error( $plan_raw ) ) {
-                return $plan_raw;
-            }
-
-            // Lépés 2: TemplateAssembler összerakja a prémium Elementor JSON-t
-            $assembler = new TemplateAssembler();
-            return $assembler->assemble( $plan_raw );
-        }
-
-        // Groq: egyetlen hívás közvetlen JSON generálással (fallback)
-        return $this->handle_groq_direct( $prompt_builder, $prompt, '', $global_styles, 'create' );
-    }
-
-    // ── Modify: közvetlen JSON módosítás ─────────────────────────────────────
-
-    private function handle_modify( string $provider, string $prompt, string $current_json, array $global_styles ): array|WP_Error {
-        $prompt_builder = new PromptBuilder();
-
-        if ( 'claude' === $provider ) {
-            $messages = $prompt_builder->build_modify( $prompt, $current_json, $global_styles );
-            $client   = new ClaudeClient();
-            $raw      = $client->chat( $messages );
-
-            if ( is_wp_error( $raw ) ) {
-                return $raw;
-            }
-
-            return $this->parse_elementor_json( $raw );
-        }
-
-        return $this->handle_groq_direct( $prompt_builder, $prompt, $current_json, $global_styles, 'modify' );
-    }
-
-    // ── Groq közvetlen hívás (create + modify) ────────────────────────────────
-
-    private function handle_groq_direct( PromptBuilder $pb, string $prompt, string $current_json, array $global_styles, string $mode ): array|WP_Error {
-        // A Groq-hoz a régi PromptBuilder build() stílusban szükségünk van egy build metódusra.
-        // Az egyszerűség kedvéért a modify promptot használjuk mindkét esethez (Groq-nál).
-        $messages = $pb->build_modify( $prompt, $current_json ?: '[]', $global_styles );
-
-        $client = new GroqClient();
-        $raw    = $client->chat( $messages );
-
-        if ( is_wp_error( $raw ) ) {
-            return $raw;
-        }
-
-        return $this->parse_elementor_json( $raw );
     }
 
     // ── JSON validálás ─────────────────────────────────────────────────────────
@@ -206,7 +152,7 @@ class RestController {
             );
         }
 
-        // Ha a wrapper {"elementor_data": [...]} formátumban jött
+        // {"elementor_data": [...]} wrapper kibontása
         if ( isset( $decoded['elementor_data'] ) && is_array( $decoded['elementor_data'] ) ) {
             $decoded = $decoded['elementor_data'];
         }
@@ -215,12 +161,11 @@ class RestController {
             return new WP_Error( 'aie_json_not_array', __( 'Az AI válasza nem Elementor JSON tömb.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
         }
 
-        $allowed_root = [ 'section', 'container' ];
         foreach ( $decoded as $element ) {
             if ( empty( $element['elType'] ) ) {
                 return new WP_Error( 'aie_json_missing_eltype', __( 'Hiányzó elType mező.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
             }
-            if ( ! in_array( $element['elType'], $allowed_root, true ) ) {
+            if ( ! in_array( $element['elType'], [ 'section', 'container' ], true ) ) {
                 return new WP_Error(
                     'aie_invalid_root_eltype',
                     sprintf( __( 'Érvénytelen root elType: "%s"', 'ai-elementor-builder' ), $element['elType'] ),
