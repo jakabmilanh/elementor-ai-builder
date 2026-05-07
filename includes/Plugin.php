@@ -62,9 +62,10 @@ final class Plugin {
         );
 
         wp_localize_script( 'aie-editor-panel', 'AIEData', [
-            'restUrl' => rest_url( 'ai-builder/v1/generate' ),
-            'nonce'   => wp_create_nonce( 'wp_rest' ),
-            'postId'  => isset( $_GET['post'] ) ? (int) $_GET['post'] : 0,
+            'restUrl'  => rest_url( 'ai-builder/v1/generate' ),
+            'nonce'    => wp_create_nonce( 'wp_rest' ),
+            'postId'   => isset( $_GET['post'] ) ? (int) $_GET['post'] : 0,
+            'hasElPro' => defined( 'ELEMENTOR_PRO_VERSION' ),
         ] );
     }
 
