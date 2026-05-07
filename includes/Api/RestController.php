@@ -9,7 +9,7 @@ namespace AIE\Api;
 
 defined( 'ABSPATH' ) || exit;
 
-use AIE\AI\GeminiClient;
+use AIE\AI\GroqClient;
 use AIE\AI\PromptBuilder;
 use AIE\Elementor\DataManager;
 use WP_REST_Request;
@@ -131,9 +131,9 @@ class RestController {
             global_styles:  $global_styles,
         );
 
-        // ── 4. Gemini hívás ───────────────────────────────────────────────────
-        $gemini    = new GeminiClient();
-        $ai_result = $gemini->chat( $messages );
+        // ── 4. Groq hívás ────────────────────────────────────────────────────
+        $groq      = new GroqClient();
+        $ai_result = $groq->chat( $messages );
 
         if ( is_wp_error( $ai_result ) ) {
             return $ai_result;

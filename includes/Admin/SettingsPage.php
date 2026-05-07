@@ -38,13 +38,13 @@ class SettingsPage {
 
         add_settings_section(
             'aie_main_section',
-            __( 'Google Gemini API Beállítások', 'ai-elementor-builder' ),
+            __( 'Groq API Beállítások', 'ai-elementor-builder' ),
             null,
             self::PAGE_SLUG
         );
 
         add_settings_field(
-            'gemini_api_key',
+            'groq_api_key',
             __( 'API Kulcs', 'ai-elementor-builder' ),
             [ $this, 'render_api_key_field' ],
             self::PAGE_SLUG,
@@ -52,7 +52,7 @@ class SettingsPage {
         );
 
         add_settings_field(
-            'gemini_model',
+            'groq_model',
             __( 'Model', 'ai-elementor-builder' ),
             [ $this, 'render_model_field' ],
             self::PAGE_SLUG,
@@ -70,9 +70,9 @@ class SettingsPage {
 
     public function sanitize_settings( array $input ): array {
         return [
-            'gemini_api_key' => sanitize_text_field( $input['gemini_api_key'] ?? '' ),
-            'gemini_model'   => sanitize_text_field( $input['gemini_model']   ?? 'gemini-2.0-flash' ),
-            'max_tokens'     => min( 8192, max( 512, (int) ( $input['max_tokens'] ?? 8192 ) ) ),
+            'groq_api_key' => sanitize_text_field( $input['groq_api_key'] ?? '' ),
+            'groq_model'   => sanitize_text_field( $input['groq_model']   ?? 'llama-3.3-70b-versatile' ),
+            'max_tokens'   => min( 8192, max( 512, (int) ( $input['max_tokens'] ?? 4096 ) ) ),
         ];
     }
 
@@ -85,9 +85,9 @@ class SettingsPage {
         <div class="wrap">
             <h1><?php esc_html_e( 'AI Elementor Builder – Beállítások', 'ai-elementor-builder' ); ?></h1>
 
-            <?php if ( empty( $settings['gemini_api_key'] ) ) : ?>
+            <?php if ( empty( $settings['groq_api_key'] ) ) : ?>
             <div class="notice notice-warning">
-                <p><?php esc_html_e( 'Kérjük, add meg a Google Gemini API kulcsot a plugin működéséhez.', 'ai-elementor-builder' ); ?></p>
+                <p><?php esc_html_e( 'Kérjük, add meg a Groq API kulcsot a plugin működéséhez.', 'ai-elementor-builder' ); ?></p>
             </div>
             <?php endif; ?>
 
@@ -110,21 +110,26 @@ class SettingsPage {
 
     public function render_api_key_field(): void {
         $settings = (array) get_option( AIE_OPTION_KEY, [] );
-        $value    = $settings['gemini_api_key'] ?? '';
+        $value    = $settings['groq_api_key'] ?? '';
         printf(
-            '<input type="password" name="%s[gemini_api_key]" value="%s" class="regular-text" autocomplete="new-password">
+            '<input type="password" name="%s[groq_api_key]" value="%s" class="regular-text" autocomplete="new-password">
              <p class="description">%s</p>',
             esc_attr( AIE_OPTION_KEY ),
             esc_attr( $value ),
-            esc_html__( 'Google AI Studio – aistudio.google.com/app/apikey oldalon generálható (ingyenes).', 'ai-elementor-builder' )
+            esc_html__( 'Groq Console – console.groq.com/keys oldalon generálható (ingyenes regisztráció).', 'ai-elementor-builder' )
         );
     }
 
     public function render_model_field(): void {
         $settings = (array) get_option( AIE_OPTION_KEY, [] );
-        $current  = $settings['gemini_model'] ?? 'gemini-2.0-flash';
-        $models   = [ 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash' ];
-        echo '<select name="' . esc_attr( AIE_OPTION_KEY ) . '[gemini_model]">';
+        $current  = $settings['groq_model'] ?? 'llama-3.3-70b-versatile';
+        $models   = [
+            'llama-3.3-70b-versatile',
+            'llama-3.1-70b-versatile',
+            'llama-3.1-8b-instant',
+            'mixtral-8x7b-32768',
+        ];
+        echo '<select name="' . esc_attr( AIE_OPTION_KEY ) . '[groq_model]">';
         foreach ( $models as $model ) {
             printf(
                 '<option value="%s" %s>%s</option>',
@@ -134,7 +139,7 @@ class SettingsPage {
             );
         }
         echo '</select>';
-        echo '<p class="description">' . esc_html__( 'Ajánlott: gemini-2.0-flash (gyors, ingyenes kvóta elérhető).', 'ai-elementor-builder' ) . '</p>';
+        echo '<p class="description">' . esc_html__( 'Ajánlott: llama-3.3-70b-versatile (legjobb minőség). Gyorsabb: llama-3.1-8b-instant.', 'ai-elementor-builder' ) . '</p>';
     }
 
     public function render_max_tokens_field(): void {

@@ -1,6 +1,6 @@
 # AI Elementor Builder
 
-WordPress plugin, amely Google Gemini segítségével generál és módosít Elementor oldalakat természetes nyelvű promptokból.
+WordPress plugin, amely Groq (Llama 3.3) segítségével generál és módosít Elementor oldalakat természetes nyelvű promptokból. Ingyenes, EU-ban is működik.
 
 ---
 
@@ -15,16 +15,16 @@ WordPress plugin, amely Google Gemini segítségével generál és módosít Ele
 
 ---
 
-## Gemini API kulcs megszerzése
+## Groq API kulcs megszerzése
 
-1. Menj a [Google AI Studio](https://aistudio.google.com/app/apikey) oldalra (`aistudio.google.com/app/apikey`)
-2. Jelentkezz be Google fiókoddal
-3. Kattints a **„Create API key"** gombra
-4. Válassz egy Google Cloud projektet (vagy hozz létre újat)
+1. Menj a [Groq Console](https://console.groq.com/keys) oldalra (`console.groq.com/keys`)
+2. Regisztrálj egy ingyenes fiókkal (Google vagy GitHub bejelentkezés is lehetséges)
+3. Kattints az **„Create API Key"** gombra
+4. Adj meg egy nevet a kulcsnak, majd kattints a **„Submit"** gombra
 5. Másold ki a generált kulcsot – **csak egyszer látható**, mentsd el biztonságos helyre!
 6. A kulcsot illeszd be a **Beállítások → AI Elementor Builder → API Kulcs** mezőbe
 
-> **Ingyenes kvóta:** A `gemini-2.0-flash` modell ingyenes szinten is elérhető (napi korláttal). Részletek: [ai.google.dev/pricing](https://ai.google.dev/pricing)
+> **Ingyenes kvóta:** Regisztráció után azonnal használható, nincs bankkártya szükséges. Napi ~14 400 kérés `llama-3.1-8b-instant` modellel, 1 000 kérés `llama-3.3-70b-versatile` modellel. Részletek: [console.groq.com/settings/limits](https://console.groq.com/settings/limits)
 
 ---
 
@@ -33,8 +33,8 @@ WordPress plugin, amely Google Gemini segítségével generál és módosít Ele
 1. Töltsd fel a `ai-elementor-builder` mappát a `/wp-content/plugins/` könyvtárba
 2. Aktiváld a plugint a WordPress admin felületen
 3. Lépj a **Beállítások → AI Elementor Builder** menüpontra
-4. Add meg a Gemini API kulcsot (lásd fent – [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey))
-5. Válassz modellt (ajánlott: `gemini-2.0-flash`)
+4. Add meg a Groq API kulcsot (lásd fent – [console.groq.com/keys](https://console.groq.com/keys))
+5. Válassz modellt (ajánlott: `llama-3.3-70b-versatile`)
 
 ---
 
@@ -43,7 +43,7 @@ WordPress plugin, amely Google Gemini segítségével generál és módosít Ele
 - WordPress 6.0+
 - PHP 8.0+
 - Elementor 3.x+
-- Google Gemini API kulcs (ingyenes kvóta elérhető)
+- Groq API kulcs (ingyenes regisztráció)
 - cURL PHP extension
 
 ---
@@ -102,7 +102,7 @@ ai-elementor-builder/
     ├── Elementor/
     │   └── DataManager.php           # _elementor_data + Kit
     └── AI/
-        ├── GeminiClient.php          # cURL Gemini kliens
+        ├── GroqClient.php            # cURL Groq kliens (OpenAI-kompatibilis)
         └── PromptBuilder.php         # System + user prompt
 ```
 
@@ -125,7 +125,7 @@ A REST endpoint az alábbi rétegeket ellenőrzi:
 
 ### Miért nem használ Guzzle-t?
 
-A WordPress core önmagában nem szállít Composer autoloader-t. Hogy a plugin függőség-mentes legyen, **natív cURL** hívást használ. Aki Guzzle-t szeretne, a `GeminiClient::chat()` metódus belsejét cserélheti le.
+A WordPress core önmagában nem szállít Composer autoloader-t. Hogy a plugin függőség-mentes legyen, **natív cURL** hívást használ. Aki Guzzle-t szeretne, a `GroqClient::chat()` metódus belsejét cserélheti le.
 
 ### JSON mentés Elementor-kompatibilis módon
 
@@ -141,7 +141,7 @@ Ha ezt kihagyod (pl. csak `update_post_meta`-val mented), az Elementor **escape 
 
 ### Prompt engineering trükkök
 
-- **`responseMimeType: application/json`** – Gemini JSON módban garantálja a parse-olható JSON-t
+- **`response_format: json_object`** – Groq JSON módban garantálja a parse-olható JSON-t
 - **Hőmérséklet 0.3** – Kevesebb kreativitás = stabilabb struktúra
 - **System promptban explicit példák** – Heading, text, button widget JSON sablonok
 - **Globális színek átadása** – Az AI így nem talál ki random hex kódokat
@@ -159,9 +159,9 @@ Ha a meglévő JSON > 12 000 karakter, a `PromptBuilder::maybe_truncate_json()` 
 
 | Hiba                          | Megoldás                                          |
 |-------------------------------|---------------------------------------------------|
-| `aie_no_api_key`              | Add meg a Gemini API kulcsot a beállításokban     |
+| `aie_no_api_key`              | Add meg a Groq API kulcsot a beállításokban      |
 | `aie_json_parse_error`        | Az AI érvénytelen JSON-t adott – próbáld újra    |
-| `aie_curl_error`              | Tűzfal/SSL probléma – ellenőrizd a `generativelanguage.googleapis.com` elérhetőségét |
+| `aie_curl_error`              | Tűzfal/SSL probléma – ellenőrizd az `api.groq.com` elérhetőségét |
 | Az oldal nem frissül          | `Elementor → Eszközök → Cache regenerálása`       |
 | `403 forbidden_post`          | A felhasználónak nincs joga az oldalhoz           |
 
