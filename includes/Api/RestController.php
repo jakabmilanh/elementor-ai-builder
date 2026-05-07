@@ -106,7 +106,7 @@ class RestController {
 
         $ai_raw = ( 'groq' === $provider )
             ? ( new GroqClient() )->chat( $messages )
-            : ( new ClaudeClient() )->chat( $messages, 16000 );
+            : ( new ClaudeClient() )->chat( $messages );
 
         if ( is_wp_error( $ai_raw ) ) {
             return $ai_raw;

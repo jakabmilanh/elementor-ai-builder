@@ -224,11 +224,17 @@
                     setStatus('❌ ' + (response.message || 'Ismeretlen hiba.'), '#e74c3c');
                 }
             },
-            error: function (xhr) {
-                const err = xhr.responseJSON;
-                const msg = err ? (err.message || err.code || JSON.stringify(err)) : (xhr.statusText || 'Hálózati hiba');
+            error: function (xhr, textStatus, errorThrown) {
+                let msg;
+                if (xhr.responseJSON) {
+                    msg = xhr.responseJSON.message || xhr.responseJSON.code || JSON.stringify(xhr.responseJSON);
+                } else if (xhr.responseText && xhr.responseText.length < 300) {
+                    msg = xhr.responseText;
+                } else {
+                    msg = 'HTTP ' + xhr.status + ' – ' + (errorThrown || textStatus || 'Hálózati hiba');
+                }
                 setStatus('❌ ' + msg, '#e74c3c');
-                console.error('[AIE]', xhr);
+                console.error('[AIE] Hiba:', xhr.status, textStatus, errorThrown, xhr.responseText ? xhr.responseText.substring(0, 500) : '');
             },
             complete: function () {
                 setLoading(false);
