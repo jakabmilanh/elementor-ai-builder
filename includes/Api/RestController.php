@@ -186,48 +186,153 @@ class RestController {
         return $result;
     }
 
-    // ── JSON validálás ─────────────────────────────────────────────────────────
+    // ── JSON validálás + javítás ──────────────────────────────────────────────
 
     private function parse_elementor_json( string $ai_raw ): array|WP_Error {
+        // 1. Markdown kódblokk eltávolítása
         $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $ai_raw );
         $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
         $cleaned = trim( $cleaned );
 
-        // Fix literal control characters inside JSON string values (Claude sometimes outputs them)
+        // 2. Vezérlőkarakter-javítás string literálokon belül
         $cleaned = $this->fix_json_control_chars( $cleaned );
 
+        // 3. Trailing comma javítás (},  } vagy ],  ] előtt)
+        $cleaned = preg_replace( '/,\s*([\}\]])/', '$1', $cleaned );
+
+        // 4. Direkt parse megkísérlete
         $decoded = json_decode( $cleaned, true );
 
+        // 5. Ha sikertelen → megpróbálunk kinyerni a JSON objektumot
         if ( JSON_ERROR_NONE !== json_last_error() ) {
+            $decoded = $this->extract_json_object( $cleaned );
+        }
+
+        // 6. Ha még mindig sikertelen → truncation recovery (csonkított válasz)
+        if ( null === $decoded ) {
+            $sections = $this->recover_truncated_sections( $cleaned );
+            if ( ! empty( $sections ) ) {
+                $decoded = $sections;
+            }
+        }
+
+        if ( null === $decoded ) {
             return new WP_Error(
                 'aie_json_parse_error',
-                sprintf( __( 'Az AI által visszaadott JSON nem érvényes: %s', 'ai-elementor-builder' ), json_last_error_msg() ),
-                [ 'status' => 422, 'raw_response' => substr( $ai_raw, 0, 500 ) ]
+                __( 'Az AI nem adott vissza értelmezhető JSON-t. Próbálj újra vagy használj rövidebb promptot.', 'ai-elementor-builder' ),
+                [ 'status' => 422 ]
             );
         }
 
-        // {"elementor_data": [...]} wrapper kibontása
+        // 7. {"elementor_data": [...]} wrapper kibontása
         if ( isset( $decoded['elementor_data'] ) && is_array( $decoded['elementor_data'] ) ) {
             $decoded = $decoded['elementor_data'];
         }
 
-        if ( ! is_array( $decoded ) ) {
-            return new WP_Error( 'aie_json_not_array', __( 'Az AI válasza nem Elementor JSON tömb.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
+        if ( ! is_array( $decoded ) || empty( $decoded ) ) {
+            return new WP_Error( 'aie_json_empty', __( 'Az AI üres oldalt generált. Próbálj újra.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
         }
 
+        // 8. Root elemek ellenőrzése
+        $allowed = [ 'section', 'container' ];
         foreach ( $decoded as $element ) {
-            if ( empty( $element['elType'] ) ) {
-                return new WP_Error( 'aie_json_missing_eltype', __( 'Hiányzó elType mező.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
-            }
-            if ( ! in_array( $element['elType'], [ 'section', 'container' ], true ) ) {
+            if ( empty( $element['elType'] ) || ! in_array( $element['elType'], $allowed, true ) ) {
                 return new WP_Error(
-                    'aie_invalid_root_eltype',
-                    sprintf( __( 'Érvénytelen root elType: "%s"', 'ai-elementor-builder' ), $element['elType'] ),
+                    'aie_invalid_structure',
+                    __( 'Az AI érvénytelen Elementor struktúrát generált. Próbálj újra.', 'ai-elementor-builder' ),
                     [ 'status' => 422 ]
                 );
             }
         }
 
         return $decoded;
+    }
+
+    /**
+     * Megkeresi az első teljes JSON objektumot a szövegben.
+     */
+    private function extract_json_object( string $text ): ?array {
+        $start = strpos( $text, '{' );
+        if ( false === $start ) return null;
+
+        $depth     = 0;
+        $in_string = false;
+        $escaped   = false;
+        $len       = strlen( $text );
+
+        for ( $i = $start; $i < $len; $i++ ) {
+            $char = $text[ $i ];
+            if ( $escaped )               { $escaped = false; continue; }
+            if ( '\\' === $char && $in_string ) { $escaped = true; continue; }
+            if ( '"' === $char )          { $in_string = ! $in_string; continue; }
+            if ( $in_string )             { continue; }
+            if ( '{' === $char )          { $depth++; }
+            if ( '}' === $char ) {
+                $depth--;
+                if ( 0 === $depth ) {
+                    $candidate = substr( $text, $start, $i - $start + 1 );
+                    $result    = json_decode( $candidate, true );
+                    return ( JSON_ERROR_NONE === json_last_error() ) ? $result : null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Csonkított válaszból kinyeri a befejezett root container elemeket.
+     * Ha a JSON félbeszakadt (max_tokens limit), az eddig kész szekciók menthetők.
+     */
+    private function recover_truncated_sections( string $text ): ?array {
+        // Megkeressük az elementor_data tömb kezdetét
+        $array_start = false;
+
+        $ed_pos = strpos( $text, '"elementor_data"' );
+        if ( false !== $ed_pos ) {
+            $array_start = strpos( $text, '[', $ed_pos );
+        }
+        if ( false === $array_start ) {
+            $array_start = strpos( $text, '[' );
+        }
+        if ( false === $array_start ) return null;
+
+        $sections  = [];
+        $i         = $array_start + 1;
+        $len       = strlen( $text );
+
+        while ( $i < $len ) {
+            // Következő '{' keresése (root section kezdete)
+            while ( $i < $len && '{' !== $text[ $i ] ) { $i++; }
+            if ( $i >= $len ) break;
+
+            $sec_start = $i;
+            $depth     = 0;
+            $in_str    = false;
+            $esc       = false;
+
+            for ( ; $i < $len; $i++ ) {
+                $c = $text[ $i ];
+                if ( $esc )                { $esc = false; continue; }
+                if ( '\\' === $c && $in_str ) { $esc = true; continue; }
+                if ( '"' === $c )          { $in_str = ! $in_str; continue; }
+                if ( $in_str )             { continue; }
+                if ( '{' === $c )          { $depth++; }
+                if ( '}' === $c ) {
+                    $depth--;
+                    if ( 0 === $depth ) {
+                        $chunk  = substr( $text, $sec_start, $i - $sec_start + 1 );
+                        $parsed = json_decode( $chunk, true );
+                        if ( JSON_ERROR_NONE === json_last_error() && ! empty( $parsed['elType'] ) ) {
+                            $sections[] = $parsed;
+                        }
+                        $i++;
+                        break;
+                    }
+                }
+                if ( ']' === $c && 0 === $depth ) break 2;
+            }
+        }
+
+        return empty( $sections ) ? null : $sections;
     }
 }

@@ -28,7 +28,15 @@ class ClaudeClient {
         $settings   = (array) get_option( AIE_OPTION_KEY, [] );
         $api_key    = $settings['claude_api_key'] ?? '';
         $model      = $settings['claude_model']   ?? 'claude-haiku-4-5-20251001';
-        $max_tokens = $max_tokens > 0 ? $max_tokens : (int) ( $settings['max_tokens'] ?? 8096 );
+        // Modellenként eltérő max output limit — Sonnet sokkal nagyobb oldalt tud generálni
+        $model_limits = [
+            'claude-haiku-4-5-20251001' => 8192,
+            'claude-sonnet-4-6'         => 16000,
+            'claude-opus-4-7'           => 16000,
+        ];
+        $model_max  = $model_limits[ $model ] ?? 8192;
+        $configured = (int) ( $settings['max_tokens'] ?? 8096 );
+        $max_tokens = $max_tokens > 0 ? min( $max_tokens, $model_max ) : min( $configured, $model_max );
 
         if ( empty( $api_key ) ) {
             return new WP_Error(
