@@ -3,7 +3,7 @@
  * Plugin Name: AI Elementor Builder
  * Plugin URI:  https://example.com/ai-elementor-builder
  * Description: Elementor oldalak építése és módosítása AI segítségével (OpenAI GPT-4).
- * Version:     1.0.0
+ * Version:     2.0.0
  * Author:      Your Name
  * License:     GPL-2.0+
  * Text Domain: ai-elementor-builder
@@ -14,7 +14,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Konstansok ────────────────────────────────────────────────────────────────
-define( 'AIE_VERSION',     '1.0.0' );
+define( 'AIE_VERSION',     '2.1.0' );
 define( 'AIE_FILE',        __FILE__ );
 define( 'AIE_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'AIE_URL',         plugin_dir_url( __FILE__ ) );

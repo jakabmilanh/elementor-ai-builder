@@ -145,9 +145,11 @@ class DataManager {
             return;
         }
 
+        // Max 5 képet töltünk le, hogy ne lógjon be a folyamat
+        $urls    = array_slice( $urls, 0, 5 );
         $url_map = [];
+
         foreach ( $urls as $url ) {
-            // Rövidítsük a URL-t (loremflickr néha visszairányít)
             $clean_url = strtok( $url, '?' );
             if ( isset( $url_map[ $clean_url ] ) ) {
                 $url_map[ $url ] = $url_map[ $clean_url ];
@@ -193,7 +195,7 @@ class DataManager {
         }
 
         // Letöltés ideiglenes fájlba
-        $tmp = download_url( $url, 30 );
+        $tmp = download_url( $url, 12 );
         if ( is_wp_error( $tmp ) ) {
             return null;
         }

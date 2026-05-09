@@ -350,15 +350,15 @@
     // ── Polling ───────────────────────────────────────────────────────────────
 
     function pollJobStatus(jobId, attempts) {
-        if (attempts > 100) {
+        if (attempts > 200) {
             setStatus('❌ Időtúllépés – a generálás túl sokáig tartott. Próbáld újra.', '#e74c3c');
             setLoading(false);
             setProgress(0);
             return;
         }
 
-        // Progress animáció: 10% → 90% a várakozás alatt
-        var progressPct = Math.min(10 + attempts * 0.8, 88);
+        // Progress animáció: 10% → 88% a várakozás alatt (200 kísérlet = 10 perc)
+        var progressPct = Math.min(10 + attempts * 0.39, 88);
         setProgress(progressPct);
 
         $.ajax({

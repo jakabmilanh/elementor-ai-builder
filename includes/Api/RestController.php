@@ -154,22 +154,66 @@ class RestController {
         $mode             = (string) $request->get_param( 'mode' );
         $reference_images = array_map( 'absint', (array) $request->get_param( 'reference_images' ) );
 
-        $job_id   = substr( str_replace( '-', '', wp_generate_uuid4() ), 0, 24 );
-        $bg_token = wp_generate_password( 32, false, false );
+        $job_id = substr( str_replace( '-', '', wp_generate_uuid4() ), 0, 24 );
 
-        set_transient( 'aie_job_' . $job_id, [
-            'status'           => 'pending',
+        $job_data = [
+            'status'           => 'processing',
             'user_id'          => get_current_user_id(),
-            'bg_token'         => wp_hash( $bg_token ),
             'post_id'          => $post_id,
             'prompt'           => $prompt,
             'mode'             => $mode,
             'reference_images' => $reference_images,
             'created'          => time(),
-            'message'          => __( 'Feladat elindítva...', 'ai-elementor-builder' ),
-        ], 2 * HOUR_IN_SECONDS );
+            'message'          => __( 'AI tervezi az oldalt...', 'ai-elementor-builder' ),
+        ];
+        set_transient( 'aie_job_' . $job_id, $job_data, 2 * HOUR_IN_SECONDS );
 
-        // Loopback kérés (nem blokkoló)
+        $response_body = wp_json_encode( [
+            'job_id'  => $job_id,
+            'status'  => 'pending',
+            'message' => __( 'Generálás elindítva.', 'ai-elementor-builder' ),
+        ] );
+
+        // ── 1. megközelítés: fastcgi_finish_request() ─────────────────────────
+        // PHP-FPM környezetben: küldi a választ a kliensnek, majd folytatja a
+        // feldolgozást a háttérben. Nincs szükség loopback kérésre.
+        if ( function_exists( 'fastcgi_finish_request' ) ) {
+            // Output pufferek törlése (WordPress ob_start-jai)
+            while ( ob_get_level() > 0 ) {
+                ob_end_clean();
+            }
+
+            // Válasz küldése a kliensnek
+            http_response_code( 202 );
+            header( 'Content-Type: application/json; charset=utf-8' );
+            header( 'Content-Length: ' . strlen( $response_body ) );
+            header( 'Connection: close' );
+            echo $response_body;
+
+            fastcgi_finish_request(); // ← kliens megkapta a választ, PHP tovább fut
+
+            // Háttérben fut tovább
+            @ignore_user_abort( true );
+            @set_time_limit( 600 );
+
+            try {
+                $this->execute_job( $job_id, $job_data );
+            } catch ( \Throwable $e ) {
+                $job_data['status']  = 'error';
+                $job_data['message'] = 'Fatális hiba: ' . $e->getMessage();
+                set_transient( 'aie_job_' . $job_id, $job_data, HOUR_IN_SECONDS );
+            }
+            exit();
+        }
+
+        // ── 2. megközelítés: loopback + WP-Cron fallback ──────────────────────
+        // Ha fastcgi_finish_request() nem elérhető (mod_php, CGI stb.)
+        $bg_token = wp_generate_password( 32, false, false );
+        $job_data['bg_token'] = wp_hash( $bg_token );
+        $job_data['status']   = 'pending';
+        set_transient( 'aie_job_' . $job_id, $job_data, 2 * HOUR_IN_SECONDS );
+
+        // Loopback (nem-blokkoló)
         wp_remote_post(
             admin_url( 'admin-ajax.php' ),
             [
@@ -184,9 +228,9 @@ class RestController {
             ]
         );
 
-        // WP-Cron fallback – ha a loopback nem indul el
+        // WP-Cron fallback – ha a loopback sikertelen
         if ( ! wp_next_scheduled( 'aie_bg_generate_cron', [ $job_id ] ) ) {
-            wp_schedule_single_event( time() + 5, 'aie_bg_generate_cron', [ $job_id, $bg_token ] );
+            wp_schedule_single_event( time() + 8, 'aie_bg_generate_cron', [ $job_id, $bg_token ] );
             spawn_cron();
         }
 
@@ -211,13 +255,23 @@ class RestController {
             return new WP_Error( 'aie_forbidden', __( 'Nem jogosult ehhez a feladathoz.', 'ai-elementor-builder' ), [ 'status' => 403 ] );
         }
 
-        // Ha 6 percnél több ideje pending – loopback és cron egyaránt sikertelen
         $age = time() - ( $job['created'] ?? 0 );
+
+        // Ha 6 percnél több ideje pending – loopback és cron egyaránt sikertelen
         if ( 'pending' === $job['status'] && $age > 360 ) {
             delete_transient( 'aie_job_' . $job_id );
             return new WP_REST_Response( [
                 'status'  => 'error',
                 'message' => __( 'A generálás nem indult el. Ellenőrizd a szerver loopback beállításait, majd próbáld újra.', 'ai-elementor-builder' ),
+            ], 200 );
+        }
+
+        // Ha 15 percnél több ideje processing – PHP process valószínűleg meghalt
+        if ( 'processing' === $job['status'] && $age > 900 ) {
+            delete_transient( 'aie_job_' . $job_id );
+            return new WP_REST_Response( [
+                'status'  => 'error',
+                'message' => __( 'A generálás váratlanul leállt (PHP timeout vagy memória limit). Próbáld rövidebb prompttal vagy kevesebb szekció kéréssel.', 'ai-elementor-builder' ),
             ], 200 );
         }
 
@@ -284,49 +338,56 @@ class RestController {
         set_transient( 'aie_job_' . $job_id, $job, 2 * HOUR_IN_SECONDS );
 
         @ignore_user_abort( true );
-        @set_time_limit( 300 );
+        @set_time_limit( 600 );
 
         $post_id          = (int) $job['post_id'];
         $prompt           = $job['prompt'];
         $mode             = $job['mode'];
         $reference_images = $job['reference_images'] ?? [];
 
-        $data_manager  = new DataManager();
-        $current_json  = $data_manager->get_elementor_data( $post_id );
-        $global_styles = $data_manager->get_global_styles();
+        try {
+            $data_manager  = new DataManager();
+            $current_json  = $data_manager->get_elementor_data( $post_id );
+            $global_styles = $data_manager->get_global_styles();
 
-        if ( 'auto' === $mode ) {
-            $mode = ( ! empty( $current_json ) && '[]' !== $current_json ) ? 'modify' : 'create';
-        }
+            if ( 'auto' === $mode ) {
+                $mode = ( ! empty( $current_json ) && '[]' !== $current_json ) ? 'modify' : 'create';
+            }
 
-        $new_data = ( 'modify' === $mode )
-            ? $this->run_modify( $prompt, $current_json, $global_styles )
-            : $this->run_create( $prompt, $global_styles, $post_id, $reference_images, $job_id );
+            $new_data = ( 'modify' === $mode )
+                ? $this->run_modify( $prompt, $current_json, $global_styles )
+                : $this->run_create( $prompt, $global_styles, $post_id, $reference_images, $job_id );
 
-        if ( is_wp_error( $new_data ) ) {
-            $job['status']  = 'error';
-            $job['message'] = $new_data->get_error_message();
+            if ( is_wp_error( $new_data ) ) {
+                $job['status']  = 'error';
+                $job['message'] = $new_data->get_error_message();
+                set_transient( 'aie_job_' . $job_id, $job, HOUR_IN_SECONDS );
+                return;
+            }
+
+            // Képek letöltése média könyvtárba
+            $this->update_job_message( $job_id, __( 'Képek mentése a médiába...', 'ai-elementor-builder' ) );
+            $data_manager->import_page_images( $new_data, $post_id );
+
+            $save_result = $data_manager->save_elementor_data( $post_id, $new_data );
+            if ( is_wp_error( $save_result ) ) {
+                $job['status']  = 'error';
+                $job['message'] = $save_result->get_error_message();
+                set_transient( 'aie_job_' . $job_id, $job, HOUR_IN_SECONDS );
+                return;
+            }
+
+            $data_manager->clear_elementor_cache( $post_id );
+
+            $job['status']  = 'done';
+            $job['message'] = __( 'Az oldal sikeresen generálva!', 'ai-elementor-builder' );
             set_transient( 'aie_job_' . $job_id, $job, HOUR_IN_SECONDS );
-            return;
-        }
 
-        // Képek letöltése média könyvtárba
-        $this->update_job_message( $job_id, __( 'Képek mentése a médiába...', 'ai-elementor-builder' ) );
-        $data_manager->import_page_images( $new_data, $post_id );
-
-        $save_result = $data_manager->save_elementor_data( $post_id, $new_data );
-        if ( is_wp_error( $save_result ) ) {
+        } catch ( \Throwable $e ) {
             $job['status']  = 'error';
-            $job['message'] = $save_result->get_error_message();
+            $job['message'] = 'Váratlan hiba: ' . $e->getMessage();
             set_transient( 'aie_job_' . $job_id, $job, HOUR_IN_SECONDS );
-            return;
         }
-
-        $data_manager->clear_elementor_cache( $post_id );
-
-        $job['status']  = 'done';
-        $job['message'] = __( 'Az oldal sikeresen generálva!', 'ai-elementor-builder' );
-        set_transient( 'aie_job_' . $job_id, $job, HOUR_IN_SECONDS );
     }
 
     // ── Create ────────────────────────────────────────────────────────────────
