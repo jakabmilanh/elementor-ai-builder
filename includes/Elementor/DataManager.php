@@ -107,16 +107,14 @@ class DataManager {
 
         $result = update_post_meta( $kit_id, '_elementor_page_settings', $kit_settings );
 
-        // Elementor Kit cache törlése
-        if (
-            class_exists( '\Elementor\Plugin' ) &&
-            isset( \Elementor\Plugin::$instance->kits_manager )
-        ) {
+        // Elementor Kit cache törlése – files_manager-en keresztül (public API)
+        if ( class_exists( '\Elementor\Plugin' ) ) {
             try {
-                $kit = \Elementor\Plugin::$instance->kits_manager->get_active_kit_for_frontend();
-                if ( $kit ) {
-                    $kit->delete_cache();
+                if ( isset( \Elementor\Plugin::$instance->files_manager ) ) {
+                    \Elementor\Plugin::$instance->files_manager->clear_cache();
                 }
+                // Kit post meta CSS gyorsítótár törlése
+                delete_post_meta( $kit_id, '_elementor_css' );
             } catch ( \Exception $e ) {
                 // Silence – cache törlés sikertelen, nem kritikus
             }
