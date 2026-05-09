@@ -17,6 +17,8 @@ defined( 'ABSPATH' ) || exit;
 use AIE\AI\ClaudeClient;
 use AIE\AI\GroqClient;
 use AIE\AI\PromptBuilder;
+use AIE\AI\TemplateAssembler;
+use AIE\AI\TemplateLibrary;
 use AIE\Elementor\DataManager;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -445,23 +447,33 @@ class RestController {
             }
         }
 
-        // 4. Szekciók szabad generálása
-        $total    = count( $section_plan );
-        $sections = [];
+        // 4. Szekciók generálása — template-first, AI fallback ismeretlen típusokhoz
+        $total     = count( $section_plan );
+        $sections  = [];
+        $assembler = new TemplateAssembler();
+        TemplateLibrary::reset_ids();
 
         foreach ( $section_plan as $idx => $section_meta ) {
-            $label = $section_meta['type'] ?? ( 'section_' . ( $idx + 1 ) );
+            $type  = $section_meta['type'] ?? '';
+            $label = $type ?: ( 'section_' . ( $idx + 1 ) );
             $this->update_job_message(
                 $job_id,
                 sprintf( __( 'Szekció: %d/%d — %s', 'ai-elementor-builder' ), $idx + 1, $total, $label )
             );
 
-            $messages = $prompt_builder->build_section( $section_meta, $prompt, $global_styles, $has_pro );
-            $raw      = $this->ai_call( $messages, 0 );
-            if ( is_wp_error( $raw ) ) {
-                continue;
+            // PHP sablon — ha van, azonnal kész (nincs AI hívás)
+            $section = $assembler->try_template( $type, $section_meta );
+
+            if ( null === $section ) {
+                // Ismeretlen típus → AI generálja
+                $messages = $prompt_builder->build_section( $section_meta, $prompt, $global_styles, $has_pro );
+                $raw      = $this->ai_call( $messages, 0 );
+                if ( is_wp_error( $raw ) ) {
+                    continue;
+                }
+                $section = $this->parse_single_section( $raw );
             }
-            $section = $this->parse_single_section( $raw );
+
             if ( null !== $section ) {
                 $sections[] = $section;
             }
@@ -593,10 +605,13 @@ class RestController {
                 continue;
             }
             $valid[] = [
-                'type'    => sanitize_key( $item['type'] ),
-                'purpose' => sanitize_text_field( $item['purpose'] ?? '' ),
-                'layout'  => sanitize_text_field( $item['layout'] ?? '' ),
-                'content' => sanitize_text_field( $item['content'] ?? '' ),
+                'type'     => sanitize_key( $item['type'] ),
+                'purpose'  => sanitize_text_field( $item['purpose'] ?? '' ),
+                'layout'   => sanitize_text_field( $item['layout'] ?? '' ),
+                'content'  => sanitize_text_field( $item['content'] ?? '' ),
+                'bg_theme' => in_array( $item['bg_theme'] ?? '', [ 'dark', 'light', 'accent' ], true )
+                              ? $item['bg_theme']
+                              : 'light',
             ];
         }
 

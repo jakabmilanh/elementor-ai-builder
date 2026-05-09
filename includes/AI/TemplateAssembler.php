@@ -89,6 +89,14 @@ class TemplateAssembler {
         return $decoded;
     }
 
+    /**
+     * Megpróbál PHP-sablonból szekciót építeni.
+     * Ha az adott típushoz nincs sablon, null-t ad vissza — a hívó AI-t hívhat.
+     */
+    public function try_template( string $type, array $c ): ?array {
+        return $this->build_section( $type, $c );
+    }
+
     private function build_section( string $type, array $c ): ?array {
         return match ( $type ) {
             'hero-split'     => TemplateLibrary::hero_split( $c ),
