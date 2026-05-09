@@ -3,12 +3,9 @@
  * REST API végpontok + aszinkron háttérfeladat-feldolgozó.
  *
  * Async flow:
- *   1. POST /generate-async → job_id (azonnali válasz, háttér indul)
- *   2. GET  /job-status/{id} → {status, message} (polling)
- *   3. wp_ajax aie_bg_generate → tényleges generálás
- *
- * Sync flow (kompatibilitás):
- *   POST /generate → blokkoló válasz (használható ha nincs 504 probléma)
+ *   POST /generate-async → {job_id}  (azonnali 202)
+ *   GET  /job-status/{id} → {status, message}  (polling)
+ *   wp_ajax aie_bg_generate → tényleges generálás
  *
  * @package AIE\Api
  */
@@ -30,7 +27,6 @@ class RestController {
     private const NAMESPACE = 'ai-builder/v1';
 
     public function register_routes(): void {
-        // Szinkron (backward compat)
         register_rest_route( self::NAMESPACE, '/generate', [
             [
                 'methods'             => 'POST',
@@ -40,7 +36,6 @@ class RestController {
             ],
         ] );
 
-        // Aszinkron indítás – azonnal válaszol job_id-vel
         register_rest_route( self::NAMESPACE, '/generate-async', [
             [
                 'methods'             => 'POST',
@@ -50,7 +45,6 @@ class RestController {
             ],
         ] );
 
-        // Feladat státusz lekérdezése (polling)
         register_rest_route( self::NAMESPACE, '/job-status/(?P<job_id>[a-zA-Z0-9_-]+)', [
             [
                 'methods'             => 'GET',
@@ -83,7 +77,7 @@ class RestController {
         return true;
     }
 
-    // ── Végpont argumentumok ──────────────────────────────────────────────────
+    // ── Argumentumok ──────────────────────────────────────────────────────────
 
     private function get_generate_args(): array {
         return [
@@ -107,15 +101,21 @@ class RestController {
                 'enum'              => [ 'auto', 'create', 'modify' ],
                 'sanitize_callback' => 'sanitize_key',
             ],
+            'reference_images' => [
+                'required'          => false,
+                'type'              => 'array',
+                'default'           => [],
+            ],
         ];
     }
 
-    // ── Szinkron kezelő (backward compat) ─────────────────────────────────────
+    // ── Szinkron kezelő ───────────────────────────────────────────────────────
 
     public function handle_generate( WP_REST_Request $request ): WP_REST_Response|WP_Error {
-        $post_id = (int) $request->get_param( 'post_id' );
-        $prompt  = (string) $request->get_param( 'prompt' );
-        $mode    = (string) $request->get_param( 'mode' );
+        $post_id          = (int) $request->get_param( 'post_id' );
+        $prompt           = (string) $request->get_param( 'prompt' );
+        $mode             = (string) $request->get_param( 'mode' );
+        $reference_images = (array) $request->get_param( 'reference_images' );
 
         $data_manager  = new DataManager();
         $current_json  = $data_manager->get_elementor_data( $post_id );
@@ -127,7 +127,7 @@ class RestController {
 
         $new_data = ( 'modify' === $mode )
             ? $this->run_modify( $prompt, $current_json, $global_styles )
-            : $this->run_create( $prompt, $global_styles );
+            : $this->run_create( $prompt, $global_styles, $post_id, $reference_images );
 
         if ( is_wp_error( $new_data ) ) {
             return $new_data;
@@ -139,40 +139,37 @@ class RestController {
         }
         $data_manager->clear_elementor_cache( $post_id );
 
-        $settings = (array) get_option( AIE_OPTION_KEY, [] );
-        $provider = $settings['ai_provider'] ?? 'claude';
-
         return new WP_REST_Response( [
-            'success'        => true,
-            'mode'           => $mode,
-            'provider'       => $provider,
-            'message'        => __( 'Az oldal sikeresen generálva/módosítva.', 'ai-elementor-builder' ),
-            'elementor_data' => $new_data,
+            'success' => true,
+            'mode'    => $mode,
+            'message' => __( 'Az oldal sikeresen generálva.', 'ai-elementor-builder' ),
         ], 200 );
     }
 
     // ── Aszinkron indítás ─────────────────────────────────────────────────────
 
     public function handle_start_async( WP_REST_Request $request ): WP_REST_Response|WP_Error {
-        $post_id = (int) $request->get_param( 'post_id' );
-        $prompt  = (string) $request->get_param( 'prompt' );
-        $mode    = (string) $request->get_param( 'mode' );
+        $post_id          = (int) $request->get_param( 'post_id' );
+        $prompt           = (string) $request->get_param( 'prompt' );
+        $mode             = (string) $request->get_param( 'mode' );
+        $reference_images = array_map( 'absint', (array) $request->get_param( 'reference_images' ) );
 
         $job_id   = substr( str_replace( '-', '', wp_generate_uuid4() ), 0, 24 );
         $bg_token = wp_generate_password( 32, false, false );
 
         set_transient( 'aie_job_' . $job_id, [
-            'status'   => 'pending',
-            'user_id'  => get_current_user_id(),
-            'bg_token' => wp_hash( $bg_token ),
-            'post_id'  => $post_id,
-            'prompt'   => $prompt,
-            'mode'     => $mode,
-            'created'  => time(),
-            'message'  => __( 'Feladat elindítva...', 'ai-elementor-builder' ),
+            'status'           => 'pending',
+            'user_id'          => get_current_user_id(),
+            'bg_token'         => wp_hash( $bg_token ),
+            'post_id'          => $post_id,
+            'prompt'           => $prompt,
+            'mode'             => $mode,
+            'reference_images' => $reference_images,
+            'created'          => time(),
+            'message'          => __( 'Feladat elindítva...', 'ai-elementor-builder' ),
         ], 2 * HOUR_IN_SECONDS );
 
-        // Nem-blokkoló loopback kérés – a szerver feldolgozza a háttérben
+        // Loopback kérés (nem blokkoló)
         wp_remote_post(
             admin_url( 'admin-ajax.php' ),
             [
@@ -187,6 +184,12 @@ class RestController {
             ]
         );
 
+        // WP-Cron fallback – ha a loopback nem indul el
+        if ( ! wp_next_scheduled( 'aie_bg_generate_cron', [ $job_id ] ) ) {
+            wp_schedule_single_event( time() + 5, 'aie_bg_generate_cron', [ $job_id, $bg_token ] );
+            spawn_cron();
+        }
+
         return new WP_REST_Response( [
             'job_id'  => $job_id,
             'status'  => 'pending',
@@ -194,7 +197,7 @@ class RestController {
         ], 202 );
     }
 
-    // ── Feladat státusz (polling endpoint) ────────────────────────────────────
+    // ── Feladat státusz ───────────────────────────────────────────────────────
 
     public function handle_job_status( WP_REST_Request $request ): WP_REST_Response|WP_Error {
         $job_id = sanitize_key( $request->get_param( 'job_id' ) );
@@ -208,13 +211,13 @@ class RestController {
             return new WP_Error( 'aie_forbidden', __( 'Nem jogosult ehhez a feladathoz.', 'ai-elementor-builder' ), [ 'status' => 403 ] );
         }
 
-        // Ha 5 percnél régebben pending – a loopback valószínűleg nem indult el
+        // Ha 6 percnél több ideje pending – loopback és cron egyaránt sikertelen
         $age = time() - ( $job['created'] ?? 0 );
-        if ( 'pending' === $job['status'] && $age > 300 ) {
+        if ( 'pending' === $job['status'] && $age > 360 ) {
             delete_transient( 'aie_job_' . $job_id );
             return new WP_REST_Response( [
                 'status'  => 'error',
-                'message' => __( 'A generálás nem indult el (loopback probléma). Próbáld újra.', 'ai-elementor-builder' ),
+                'message' => __( 'A generálás nem indult el. Ellenőrizd a szerver loopback beállításait, majd próbáld újra.', 'ai-elementor-builder' ),
             ], 200 );
         }
 
@@ -230,7 +233,7 @@ class RestController {
         return new WP_REST_Response( $response, 200 );
     }
 
-    // ── Háttérfeladat-feldolgozó (wp_ajax) ───────────────────────────────────
+    // ── Háttérfeladat (wp_ajax) ───────────────────────────────────────────────
 
     public function process_bg_job(): void {
         $job_id   = sanitize_key( $_POST['job_id'] ?? '' );
@@ -241,15 +244,41 @@ class RestController {
         }
 
         $job = get_transient( 'aie_job_' . $job_id );
+        if ( false === $job || ! hash_equals( $job['bg_token'], wp_hash( $bg_token ) ) ) {
+            wp_die();
+        }
+
+        // Ha már fut vagy kész, skip
+        if ( in_array( $job['status'], [ 'processing', 'done', 'error' ], true ) ) {
+            wp_die();
+        }
+
+        $this->execute_job( $job_id, $job );
+        wp_die();
+    }
+
+    /**
+     * WP-Cron fallback: csak akkor fut le, ha a loopback nem indult el.
+     */
+    public function cron_process_job( string $job_id, string $bg_token ): void {
+        $job = get_transient( 'aie_job_' . $job_id );
         if ( false === $job ) {
-            wp_die();
+            return;
         }
-
         if ( ! hash_equals( $job['bg_token'], wp_hash( $bg_token ) ) ) {
-            wp_die();
+            return;
         }
+        // Ha a loopback már elvégezte, skip
+        if ( in_array( $job['status'], [ 'processing', 'done', 'error' ], true ) ) {
+            return;
+        }
+        $this->execute_job( $job_id, $job );
+    }
 
-        // Feldolgozás állapot
+    /**
+     * A tényleges generálási logika – loopback és cron is ezt hívja.
+     */
+    private function execute_job( string $job_id, array $job ): void {
         $job['status']  = 'processing';
         $job['message'] = __( 'AI tervezi az oldalt...', 'ai-elementor-builder' );
         set_transient( 'aie_job_' . $job_id, $job, 2 * HOUR_IN_SECONDS );
@@ -257,9 +286,10 @@ class RestController {
         @ignore_user_abort( true );
         @set_time_limit( 300 );
 
-        $post_id = (int) $job['post_id'];
-        $prompt  = $job['prompt'];
-        $mode    = $job['mode'];
+        $post_id          = (int) $job['post_id'];
+        $prompt           = $job['prompt'];
+        $mode             = $job['mode'];
+        $reference_images = $job['reference_images'] ?? [];
 
         $data_manager  = new DataManager();
         $current_json  = $data_manager->get_elementor_data( $post_id );
@@ -271,21 +301,25 @@ class RestController {
 
         $new_data = ( 'modify' === $mode )
             ? $this->run_modify( $prompt, $current_json, $global_styles )
-            : $this->run_create( $prompt, $global_styles, $job_id );
+            : $this->run_create( $prompt, $global_styles, $post_id, $reference_images, $job_id );
 
         if ( is_wp_error( $new_data ) ) {
             $job['status']  = 'error';
             $job['message'] = $new_data->get_error_message();
             set_transient( 'aie_job_' . $job_id, $job, HOUR_IN_SECONDS );
-            wp_die();
+            return;
         }
+
+        // Képek letöltése média könyvtárba
+        $this->update_job_message( $job_id, __( 'Képek mentése a médiába...', 'ai-elementor-builder' ) );
+        $data_manager->import_page_images( $new_data, $post_id );
 
         $save_result = $data_manager->save_elementor_data( $post_id, $new_data );
         if ( is_wp_error( $save_result ) ) {
             $job['status']  = 'error';
             $job['message'] = $save_result->get_error_message();
             set_transient( 'aie_job_' . $job_id, $job, HOUR_IN_SECONDS );
-            wp_die();
+            return;
         }
 
         $data_manager->clear_elementor_cache( $post_id );
@@ -293,19 +327,52 @@ class RestController {
         $job['status']  = 'done';
         $job['message'] = __( 'Az oldal sikeresen generálva!', 'ai-elementor-builder' );
         set_transient( 'aie_job_' . $job_id, $job, HOUR_IN_SECONDS );
-
-        wp_die();
     }
 
-    // ── Create: terv + szekciónkénti generálás ───────────────────────────────
+    // ── Create ────────────────────────────────────────────────────────────────
 
-    private function run_create( string $prompt, array $global_styles, string $job_id = '' ): array|WP_Error {
+    private function run_create(
+        string $prompt,
+        array  $global_styles,
+        int    $post_id = 0,
+        array  $reference_image_ids = [],
+        string $job_id = ''
+    ): array|WP_Error {
         $has_pro        = defined( 'ELEMENTOR_PRO_VERSION' );
         $prompt_builder = new PromptBuilder();
+        $data_manager   = new DataManager();
+        $settings       = (array) get_option( AIE_OPTION_KEY, [] );
+        $provider       = $settings['ai_provider'] ?? 'claude';
 
-        // 1. lépés: szabad formátumú oldal-terv
+        // 1. Szín-paletta generálás / Kit frissítés
+        $this->update_job_message( $job_id, __( 'Szín-paletta generálása...', 'ai-elementor-builder' ) );
+        $detected_colors = $this->extract_colors_from_prompt( $prompt );
+        $kit_colors      = $global_styles['colors'] ?? [];
+
+        // Ha nincs kit szín VAGY van saját szín a promptban → generáljunk palettát
+        if ( empty( $kit_colors ) || ! empty( $detected_colors ) ) {
+            $palette = $this->generate_color_palette( $prompt, $prompt_builder, $detected_colors );
+            if ( ! empty( $palette ) ) {
+                $data_manager->set_kit_colors( $palette );
+                // Frissítjük a global_styles-t az új palettával
+                $global_styles = $data_manager->get_global_styles();
+            }
+        }
+
+        // 2. Referencia képek URL-ek lekérése (attachment ID → URL)
+        $vision_image_urls = [];
+        if ( ! empty( $reference_image_ids ) && 'claude' === $provider ) {
+            foreach ( $reference_image_ids as $att_id ) {
+                $url = $data_manager->get_attachment_url( (int) $att_id );
+                if ( $url ) {
+                    $vision_image_urls[] = $url;
+                }
+            }
+        }
+
+        // 3. Oldal-terv generálás
         $this->update_job_message( $job_id, __( 'AI tervezi az oldal struktúráját...', 'ai-elementor-builder' ) );
-        $plan_messages = $prompt_builder->build_plan( $prompt );
+        $plan_messages = $prompt_builder->build_plan( $prompt, $vision_image_urls );
         $plan_raw      = $this->ai_call( $plan_messages, 512 );
 
         if ( is_wp_error( $plan_raw ) ) {
@@ -317,20 +384,15 @@ class RestController {
             }
         }
 
+        // 4. Szekciók szabad generálása
         $total    = count( $section_plan );
         $sections = [];
 
-        // 2. lépés: szekciók szabad generálása
         foreach ( $section_plan as $idx => $section_meta ) {
-            $section_label = $section_meta['type'] ?? ( 'section_' . ( $idx + 1 ) );
+            $label = $section_meta['type'] ?? ( 'section_' . ( $idx + 1 ) );
             $this->update_job_message(
                 $job_id,
-                sprintf(
-                    __( 'Szekció generálása: %d/%d — %s', 'ai-elementor-builder' ),
-                    $idx + 1,
-                    $total,
-                    $section_label
-                )
+                sprintf( __( 'Szekció: %d/%d — %s', 'ai-elementor-builder' ), $idx + 1, $total, $label )
             );
 
             $messages = $prompt_builder->build_section( $section_meta, $prompt, $global_styles, $has_pro );
@@ -367,6 +429,64 @@ class RestController {
         return $this->parse_elementor_json( $raw );
     }
 
+    // ── Szín-paletta generálás ────────────────────────────────────────────────
+
+    private function extract_colors_from_prompt( string $prompt ): array {
+        $colors = [];
+
+        // Hex kódok kiszedése
+        preg_match_all( '/#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b/', $prompt, $hex_matches );
+        foreach ( $hex_matches[0] as $hex ) {
+            $colors[] = strtolower( $hex );
+        }
+
+        // Alapszín nevek
+        $color_map = [
+            'kék' => '#1d4ed8', 'blue' => '#1d4ed8', 'navy' => '#1e3a5f',
+            'piros' => '#dc2626', 'red' => '#dc2626', 'crimson' => '#dc143c',
+            'zöld' => '#16a34a', 'green' => '#16a34a',
+            'lila' => '#7c3aed', 'purple' => '#7c3aed', 'violet' => '#8b5cf6',
+            'narancs' => '#ea580c', 'orange' => '#ea580c',
+            'sárga' => '#ca8a04', 'yellow' => '#ca8a04', 'gold' => '#b45309',
+            'pink' => '#ec4899', 'rosa' => '#ec4899',
+            'türkiz' => '#0d9488', 'teal' => '#0d9488', 'cyan' => '#0891b2',
+            'barna' => '#92400e', 'brown' => '#92400e',
+            'fekete' => '#111827', 'black' => '#111827',
+            'fehér' => '#ffffff', 'white' => '#ffffff',
+        ];
+
+        $prompt_lower = mb_strtolower( $prompt );
+        foreach ( $color_map as $name => $hex ) {
+            if ( false !== mb_strpos( $prompt_lower, $name ) ) {
+                $colors[] = $hex;
+            }
+        }
+
+        return array_unique( $colors );
+    }
+
+    private function generate_color_palette( string $prompt, PromptBuilder $builder, array $detected_colors ): array {
+        $messages = $builder->build_color_scheme( $prompt, $detected_colors );
+        $raw      = $this->ai_call( $messages, 200 );
+
+        if ( is_wp_error( $raw ) ) {
+            return [];
+        }
+
+        $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $raw );
+        $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
+        $cleaned = trim( $cleaned );
+
+        $start = strpos( $cleaned, '{' );
+        $end   = strrpos( $cleaned, '}' );
+        if ( false === $start || false === $end ) {
+            return [];
+        }
+
+        $palette = json_decode( substr( $cleaned, $start, $end - $start + 1 ), true );
+        return is_array( $palette ) ? $palette : [];
+    }
+
     // ── AI hívás ─────────────────────────────────────────────────────────────
 
     private function ai_call( array $messages, int $max_tokens = 0 ): string|WP_Error {
@@ -377,10 +497,10 @@ class RestController {
             : ( new ClaudeClient() )->chat( $messages, $max_tokens );
     }
 
-    // ── Háttérfeladat progress frissítés ─────────────────────────────────────
-
     private function update_job_message( string $job_id, string $message ): void {
-        if ( empty( $job_id ) ) return;
+        if ( empty( $job_id ) ) {
+            return;
+        }
         $job = get_transient( 'aie_job_' . $job_id );
         if ( false !== $job ) {
             $job['message'] = $message;
@@ -388,7 +508,7 @@ class RestController {
         }
     }
 
-    // ── Plan parsing ─────────────────────────────────────────────────────────
+    // ── Plan parsing ──────────────────────────────────────────────────────────
 
     private function parse_plan( string $raw ): array {
         $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $raw );
@@ -401,9 +521,7 @@ class RestController {
             return [];
         }
 
-        $json    = substr( $cleaned, $start, $end - $start + 1 );
-        $decoded = json_decode( $json, true );
-
+        $decoded = json_decode( substr( $cleaned, $start, $end - $start + 1 ), true );
         if ( ! is_array( $decoded ) ) {
             return [];
         }
@@ -424,33 +542,28 @@ class RestController {
         if ( count( $valid ) < 3 ) {
             return [];
         }
-        if ( count( $valid ) > 9 ) {
-            $valid = array_slice( $valid, 0, 9 );
-        }
 
-        return $valid;
+        return array_slice( $valid, 0, 9 );
     }
 
     private function get_default_plan(): array {
         return [
-            [ 'type' => 'hero',         'purpose' => 'Above-the-fold hero with headline and primary CTA',   'layout' => 'full-height split: text left 55%, image right 45%, dark gradient background',  'content' => 'h1 headline, subtitle, CTA button, 3 key stats' ],
-            [ 'type' => 'services',     'purpose' => 'Showcase main services or features',                  'layout' => '3-column white cards with icons on light gray background',                     'content' => '3 service cards: icon, title, 2-sentence description' ],
-            [ 'type' => 'about',        'purpose' => 'Build trust and explain why to choose this business', 'layout' => 'two-column: benefit list left, photo right, white background',                  'content' => 'section label, h2, 4 checkmark benefits, CTA button, photo' ],
-            [ 'type' => 'stats',        'purpose' => 'Impress with numbers and social proof metrics',       'layout' => 'full-width accent gradient background, 4 counter widgets in a row',             'content' => '4 industry-specific statistics with numbers and labels' ],
-            [ 'type' => 'testimonials', 'purpose' => 'Social proof from real satisfied clients',            'layout' => '3-column testimonial cards on white background',                                'content' => '3 quotes with client name, job title, star rating, avatar photo' ],
-            [ 'type' => 'faq',          'purpose' => 'Reduce friction by answering common questions',       'layout' => 'two-column: intro text left, accordion right, light gray background',           'content' => '4-5 real Q&A pairs relevant to the business' ],
-            [ 'type' => 'cta',          'purpose' => 'Final conversion push to get visitors to act',        'layout' => 'full-width centered, dark gradient background, large text',                     'content' => 'compelling headline, social proof subtitle, prominent CTA button' ],
+            [ 'type' => 'hero',         'purpose' => 'Above-the-fold hero with headline and primary CTA',     'layout' => 'full-height split: text left 55%, image right 45%, dark gradient background',   'content' => 'h1 headline, subtitle, CTA button, 3 key stats' ],
+            [ 'type' => 'services',     'purpose' => 'Showcase main services or features',                    'layout' => '3-column white cards with icons on light gray background',                      'content' => '3 service cards: icon, title, 2-sentence description' ],
+            [ 'type' => 'about',        'purpose' => 'Build trust, explain why to choose this business',      'layout' => 'two-column: benefit list left, photo right, white background',                   'content' => 'section label, h2, 4 checkmark benefits, CTA button, photo' ],
+            [ 'type' => 'stats',        'purpose' => 'Impress with numbers and social proof metrics',         'layout' => 'full-width accent gradient background, 4 counter widgets in a row',              'content' => '4 industry-specific statistics' ],
+            [ 'type' => 'testimonials', 'purpose' => 'Social proof from real satisfied clients',              'layout' => '3-column testimonial cards on white background',                                 'content' => '3 quotes with client name, job title, star rating, avatar photo' ],
+            [ 'type' => 'faq',          'purpose' => 'Reduce friction by answering common questions',         'layout' => 'two-column: intro text left, accordion right, light gray background',            'content' => '4-5 real Q&A pairs relevant to the business' ],
+            [ 'type' => 'cta',          'purpose' => 'Final conversion push to get visitors to act',          'layout' => 'full-width centered, dark gradient background',                                  'content' => 'compelling headline, social proof subtitle, CTA button' ],
         ];
     }
 
-    // ── Single section parsing ────────────────────────────────────────────────
+    // ── JSON parsing ─────────────────────────────────────────────────────────
 
     private function parse_single_section( string $raw ): ?array {
         $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $raw );
         $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
-        $cleaned = trim( $cleaned );
-
-        $cleaned = $this->fix_json_control_chars( $cleaned );
+        $cleaned = $this->fix_json_control_chars( trim( $cleaned ) );
         $cleaned = preg_replace( '/,\s*([\}\]])/', '$1', $cleaned );
 
         $decoded = json_decode( $cleaned, true );
@@ -464,52 +577,34 @@ class RestController {
         return $decoded;
     }
 
-    // ── Full-page JSON parsing (modify mode) ─────────────────────────────────
-
     private function parse_elementor_json( string $ai_raw ): array|WP_Error {
         $cleaned = preg_replace( '/^```(?:json)?\s*/m', '', $ai_raw );
         $cleaned = preg_replace( '/\s*```$/m', '', $cleaned );
-        $cleaned = trim( $cleaned );
-
-        $cleaned = $this->fix_json_control_chars( $cleaned );
+        $cleaned = $this->fix_json_control_chars( trim( $cleaned ) );
         $cleaned = preg_replace( '/,\s*([\}\]])/', '$1', $cleaned );
 
         $decoded = json_decode( $cleaned, true );
         if ( JSON_ERROR_NONE !== json_last_error() ) {
             $decoded = $this->extract_json_object( $cleaned );
         }
-
         if ( null === $decoded ) {
-            $sections = $this->recover_truncated_sections( $cleaned );
-            if ( ! empty( $sections ) ) {
-                $decoded = $sections;
-            }
+            $decoded = $this->recover_truncated_sections( $cleaned );
         }
-
         if ( null === $decoded ) {
-            return new WP_Error(
-                'aie_json_parse_error',
-                __( 'Az AI nem adott vissza értelmezhető JSON-t. Próbálj újra vagy használj rövidebb promptot.', 'ai-elementor-builder' ),
-                [ 'status' => 422 ]
-            );
+            return new WP_Error( 'aie_json_parse_error', __( 'Az AI nem adott vissza értelmezhető JSON-t.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
         }
 
         if ( isset( $decoded['elementor_data'] ) && is_array( $decoded['elementor_data'] ) ) {
             $decoded = $decoded['elementor_data'];
         }
-
         if ( ! is_array( $decoded ) || empty( $decoded ) ) {
-            return new WP_Error( 'aie_json_empty', __( 'Az AI üres oldalt generált. Próbálj újra.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
+            return new WP_Error( 'aie_json_empty', __( 'Az AI üres oldalt generált.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
         }
 
         $allowed = [ 'section', 'container' ];
         foreach ( $decoded as $element ) {
             if ( empty( $element['elType'] ) || ! in_array( $element['elType'], $allowed, true ) ) {
-                return new WP_Error(
-                    'aie_invalid_structure',
-                    __( 'Az AI érvénytelen Elementor struktúrát generált. Próbálj újra.', 'ai-elementor-builder' ),
-                    [ 'status' => 422 ]
-                );
+                return new WP_Error( 'aie_invalid_structure', __( 'Az AI érvénytelen Elementor struktúrát generált.', 'ai-elementor-builder' ), [ 'status' => 422 ] );
             }
         }
 
@@ -519,19 +614,12 @@ class RestController {
     // ── JSON javítók ─────────────────────────────────────────────────────────
 
     private function fix_json_control_chars( string $json ): string {
-        $result    = '';
-        $in_string = false;
-        $escaped   = false;
-        $len       = strlen( $json );
-
+        $result = ''; $in_string = false; $escaped = false; $len = strlen( $json );
         for ( $i = 0; $i < $len; $i++ ) {
-            $char = $json[ $i ];
-            $ord  = ord( $char );
-
+            $char = $json[ $i ]; $ord = ord( $char );
             if ( $escaped )                    { $result .= $char; $escaped = false; continue; }
             if ( '\\' === $char && $in_string ) { $result .= $char; $escaped = true; continue; }
             if ( '"' === $char )               { $in_string = ! $in_string; $result .= $char; continue; }
-
             if ( $in_string && $ord < 0x20 ) {
                 switch ( $char ) {
                     case "\n": $result .= '\\n'; break;
@@ -549,10 +637,7 @@ class RestController {
     private function extract_json_object( string $text ): ?array {
         $start = strpos( $text, '{' );
         if ( false === $start ) return null;
-
-        $depth = 0; $in_string = false; $escaped = false;
-        $len = strlen( $text );
-
+        $depth = 0; $in_string = false; $escaped = false; $len = strlen( $text );
         for ( $i = $start; $i < $len; $i++ ) {
             $char = $text[ $i ];
             if ( $escaped )                    { $escaped = false; continue; }
@@ -575,25 +660,15 @@ class RestController {
     private function recover_truncated_sections( string $text ): ?array {
         $array_start = false;
         $ed_pos = strpos( $text, '"elementor_data"' );
-        if ( false !== $ed_pos ) {
-            $array_start = strpos( $text, '[', $ed_pos );
-        }
-        if ( false === $array_start ) {
-            $array_start = strpos( $text, '[' );
-        }
+        if ( false !== $ed_pos ) { $array_start = strpos( $text, '[', $ed_pos ); }
+        if ( false === $array_start ) { $array_start = strpos( $text, '[' ); }
         if ( false === $array_start ) return null;
 
-        $sections = [];
-        $i        = $array_start + 1;
-        $len      = strlen( $text );
-
+        $sections = []; $i = $array_start + 1; $len = strlen( $text );
         while ( $i < $len ) {
             while ( $i < $len && '{' !== $text[ $i ] ) { $i++; }
             if ( $i >= $len ) break;
-
-            $sec_start = $i;
-            $depth = 0; $in_str = false; $esc = false;
-
+            $sec_start = $i; $depth = 0; $in_str = false; $esc = false;
             for ( ; $i < $len; $i++ ) {
                 $c = $text[ $i ];
                 if ( $esc )                   { $esc = false; continue; }
@@ -616,7 +691,6 @@ class RestController {
                 if ( ']' === $c && 0 === $depth ) break 2;
             }
         }
-
         return empty( $sections ) ? null : $sections;
     }
 }

@@ -1,11 +1,12 @@
 /**
  * AI Elementor Builder – Editor Panel
- * Async generation with polling — no more 504 timeouts.
+ * Async generation + polling, referencia képek, progress bar.
  */
 (function ($) {
     'use strict';
 
-    let panelInjected = false;
+    let panelInjected    = false;
+    let referenceImages  = [];   // [{id, url, thumb}]
 
     $(document).ready(tryInit);
     $(window).on('elementor:init', tryInit);
@@ -30,7 +31,7 @@
 
         const proNotice = !hasPro
             ? `<div style="background:rgba(230,126,34,0.12);border:1px solid rgba(230,126,34,0.35);border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#e67e22;line-height:1.5;">
-                ⚡ Elementor <strong>Free</strong> aktív — Flip Box, Animated Headline és egyéb Pro widgetek nem elérhetők. <a href="https://elementor.com/pro/" target="_blank" style="color:#e67e22;">Frissíts Pro-ra</a>
+                ⚡ Elementor <strong>Free</strong> aktív — Flip Box, Animated Headline és egyéb Pro widgetek nem elérhetők.
                </div>`
             : `<div style="background:rgba(39,174,96,0.10);border:1px solid rgba(39,174,96,0.30);border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#27ae60;line-height:1.5;">
                 ✅ Elementor <strong>Pro</strong> aktív — összes widget elérhető.
@@ -41,7 +42,7 @@
                 position: fixed;
                 bottom: 20px;
                 right: 20px;
-                width: 370px;
+                width: 380px;
                 background: #12122a;
                 border: 1px solid rgba(233,69,96,0.5);
                 border-radius: 14px;
@@ -78,9 +79,7 @@
 
                     <!-- Mód -->
                     <div style="margin-bottom:12px;">
-                        <label style="color:#8899aa;font-size:10px;text-transform:uppercase;letter-spacing:.8px;font-weight:600;">
-                            Mód
-                        </label>
+                        <label style="color:#8899aa;font-size:10px;text-transform:uppercase;letter-spacing:.8px;font-weight:600;">Mód</label>
                         <div style="display:flex;gap:14px;margin-top:6px;">
                             <label style="color:#ccd;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px;">
                                 <input type="radio" name="aie-mode" value="auto" checked> Auto
@@ -95,9 +94,9 @@
                     </div>
 
                     <!-- Prompt -->
-                    <textarea id="aie-prompt" placeholder="Pl.: Készíts egy modern fogorvosi landing page-t időpontfoglalással, szolgáltatásokkal és véleményekkel..." style="
+                    <textarea id="aie-prompt" placeholder="Pl.: Készíts egy modern fogorvosi landing page-t kék-fehér színekkel, időpontfoglalással és véleményekkel..." style="
                         width: 100%;
-                        height: 110px;
+                        height: 90px;
                         background: #0c0c1e;
                         border: 1px solid #2a2a4a;
                         border-radius: 8px;
@@ -112,10 +111,28 @@
                         outline: none;
                     "></textarea>
 
+                    <!-- Referencia képek -->
+                    <div style="margin-top:10px;">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                            <label style="color:#8899aa;font-size:10px;text-transform:uppercase;letter-spacing:.8px;font-weight:600;">
+                                Design referencia
+                            </label>
+                            <button id="aie-add-ref-img" type="button" style="
+                                background:rgba(233,69,96,0.15);border:1px solid rgba(233,69,96,0.4);
+                                color:#e94560;border-radius:5px;padding:3px 10px;font-size:11px;
+                                cursor:pointer;font-weight:600;
+                            ">+ Kép hozzáadása</button>
+                        </div>
+                        <div id="aie-ref-thumbnails" style="display:flex;gap:6px;flex-wrap:wrap;min-height:0;"></div>
+                        <div style="font-size:10px;color:#445;margin-top:4px;line-height:1.4;">
+                            Adj meg max. 3 képet amit az AI design inspirációként használ.
+                        </div>
+                    </div>
+
                     <!-- Generálás gomb -->
                     <button id="aie-generate" type="button" style="
                         width: 100%;
-                        margin-top: 10px;
+                        margin-top: 12px;
                         background: linear-gradient(135deg, #e94560, #c73652);
                         color: #fff;
                         border: none;
@@ -126,14 +143,12 @@
                         cursor: pointer;
                         letter-spacing: .3px;
                         transition: opacity .2s, transform .1s;
-                    ">
-                        ✨ Generálás
-                    </button>
+                    ">✨ Generálás</button>
 
                     <!-- Progress bar -->
                     <div id="aie-progress-wrap" style="display:none;margin-top:10px;">
                         <div style="height:3px;background:#1a1a3a;border-radius:2px;overflow:hidden;">
-                            <div id="aie-progress-bar" style="height:100%;background:linear-gradient(90deg,#e94560,#c73652);width:0%;transition:width .4s ease;border-radius:2px;"></div>
+                            <div id="aie-progress-bar" style="height:100%;background:linear-gradient(90deg,#e94560,#c73652);width:0%;transition:width .5s ease;border-radius:2px;"></div>
                         </div>
                     </div>
 
@@ -188,6 +203,80 @@
         $(document).on('keydown', '#aie-prompt', function (e) {
             if (e.ctrlKey && e.key === 'Enter') handleGenerate();
         });
+
+        // Referencia kép hozzáadása
+        $(document).on('click', '#aie-add-ref-img', openMediaPicker);
+
+        // Referencia kép törlése
+        $(document).on('click', '.aie-ref-remove', function () {
+            const id = parseInt($(this).data('id'), 10);
+            referenceImages = referenceImages.filter(img => img.id !== id);
+            renderThumbnails();
+        });
+    }
+
+    // ── Média könyvtár picker ─────────────────────────────────────────────────
+
+    function openMediaPicker() {
+        if (referenceImages.length >= 3) {
+            setStatus('⚠️ Maximum 3 referencia kép adható meg.', '#f39c12');
+            return;
+        }
+
+        // wp.media elérhetőség ellenőrzése
+        if (typeof wp === 'undefined' || !wp.media) {
+            setStatus('⚠️ WordPress média könyvtár nem elérhető.', '#f39c12');
+            return;
+        }
+
+        const frame = wp.media({
+            title:    'Válassz design referencia képet',
+            button:   { text: 'Referenciaként használom' },
+            multiple: false,
+            library:  { type: 'image' },
+        });
+
+        frame.on('select', function () {
+            const attachment = frame.state().get('selection').first().toJSON();
+
+            // Duplikátum ellenőrzés
+            if (referenceImages.find(img => img.id === attachment.id)) return;
+
+            const thumb = attachment.sizes && attachment.sizes.thumbnail
+                ? attachment.sizes.thumbnail.url
+                : attachment.url;
+
+            referenceImages.push({
+                id:    attachment.id,
+                url:   attachment.url,
+                thumb: thumb,
+                title: attachment.title || '',
+            });
+
+            renderThumbnails();
+        });
+
+        frame.open();
+    }
+
+    function renderThumbnails() {
+        const $container = $('#aie-ref-thumbnails');
+        $container.empty();
+
+        referenceImages.forEach(function (img) {
+            $container.append(`
+                <div style="position:relative;width:64px;height:64px;border-radius:6px;overflow:hidden;border:1px solid rgba(233,69,96,0.4);">
+                    <img src="${img.thumb}" alt="${img.title}" style="width:100%;height:100%;object-fit:cover;">
+                    <button class="aie-ref-remove" data-id="${img.id}" type="button" style="
+                        position:absolute;top:1px;right:1px;
+                        background:rgba(0,0,0,0.75);border:none;color:#fff;
+                        border-radius:3px;width:18px;height:18px;font-size:12px;
+                        line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;
+                        padding:0;
+                    ">×</button>
+                </div>
+            `);
+        });
     }
 
     // ── AI generálás (async + polling) ───────────────────────────────────────
@@ -214,6 +303,8 @@
         setLoading(true);
         setProgress(5);
 
+        const refImageIds = referenceImages.map(img => img.id);
+
         $.ajax({
             url:         AIEData.restBase + '/generate-async',
             method:      'POST',
@@ -221,7 +312,12 @@
                 xhr.setRequestHeader('X-WP-Nonce', AIEData.nonce);
             },
             contentType: 'application/json',
-            data:        JSON.stringify({ post_id: postId, prompt: prompt, mode: mode }),
+            data:        JSON.stringify({
+                post_id:          postId,
+                prompt:           prompt,
+                mode:             mode,
+                reference_images: refImageIds,
+            }),
             timeout:     15000,
             success:     function (response) {
                 if (response && response.job_id) {
@@ -254,8 +350,7 @@
     // ── Polling ───────────────────────────────────────────────────────────────
 
     function pollJobStatus(jobId, attempts) {
-        // Max ~4 perc várakozás (80 × 3s)
-        if (attempts > 80) {
+        if (attempts > 100) {
             setStatus('❌ Időtúllépés – a generálás túl sokáig tartott. Próbáld újra.', '#e74c3c');
             setLoading(false);
             setProgress(0);
@@ -263,7 +358,7 @@
         }
 
         // Progress animáció: 10% → 90% a várakozás alatt
-        var progressPct = Math.min(10 + attempts * 1.1, 88);
+        var progressPct = Math.min(10 + attempts * 0.8, 88);
         setProgress(progressPct);
 
         $.ajax({
@@ -272,7 +367,7 @@
             beforeSend: function (xhr) {
                 xhr.setRequestHeader('X-WP-Nonce', AIEData.nonce);
             },
-            timeout: 8000,
+            timeout: 10000,
             success: function (res) {
                 if (res.status === 'done') {
                     setProgress(100);
@@ -289,7 +384,7 @@
                     setProgress(0);
 
                 } else {
-                    // pending vagy processing – mutasd a szerver üzenetét ha van
+                    // pending / processing – szerver üzenet megjelenítése
                     if (res.message && res.message.length > 3) {
                         setStatus('⏳ ' + res.message, '#3498db');
                     }

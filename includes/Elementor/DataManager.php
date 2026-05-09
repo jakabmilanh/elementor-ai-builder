@@ -1,6 +1,8 @@
 <?php
 /**
  * Elementor adatok olvasása és írása.
+ * + Kit color scheme management
+ * + Media library image import
  *
  * @package AIE\Elementor
  */
@@ -17,9 +19,6 @@ class DataManager {
 
     // ── Olvasás ───────────────────────────────────────────────────────────────
 
-    /**
-     * Az oldal Elementor JSON-ja (nyers string).
-     */
     public function get_elementor_data( int $post_id ): string {
         $raw = get_post_meta( $post_id, self::META_KEY, true );
         return is_string( $raw ) ? $raw : '';
@@ -27,7 +26,6 @@ class DataManager {
 
     /**
      * Globális stílusok az aktív Elementor Kit-ből.
-     * Visszatér egy tömbbel: ['colors' => [...], 'typography' => [...]]
      */
     public function get_global_styles(): array {
         $kit_id = $this->get_active_kit_id();
@@ -35,7 +33,6 @@ class DataManager {
             return [ 'colors' => [], 'typography' => [] ];
         }
 
-        // Elementor Kit globális értékei a '__globals__' meta alatt vagy a kit settings-ben
         $kit_settings = get_post_meta( $kit_id, '_elementor_page_settings', true );
         if ( ! is_array( $kit_settings ) ) {
             $kit_settings = [];
@@ -49,15 +46,7 @@ class DataManager {
 
     // ── Írás ──────────────────────────────────────────────────────────────────
 
-    /**
-     * Elmenti a generált Elementor adatot.
-     *
-     * @param int   $post_id
-     * @param array $data     Dekódolt PHP tömb (nem JSON string!)
-     * @return true|WP_Error
-     */
     public function save_elementor_data( int $post_id, array $data ): true|WP_Error {
-        // Elementor a wp_slash() + json_encode() kombinációt várja
         $json   = wp_slash( wp_json_encode( $data ) );
         $result = update_post_meta( $post_id, self::META_KEY, $json );
 
@@ -69,15 +58,177 @@ class DataManager {
             );
         }
 
-        // Jelöljük, hogy ez Elementor-szerkesztett oldal
         update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
-
         return true;
     }
 
     /**
-     * Elementor fájl-cache törlése az adott oldalhoz.
+     * Kit custom colors lecserélése az AI által generált palettával.
+     *
+     * @param array $palette ['primary'=>'#hex', 'accent'=>'#hex', 'dark'=>'#hex', 'light'=>'#hex', 'muted'=>'#hex', ...]
      */
+    public function set_kit_colors( array $palette ): bool {
+        $kit_id = $this->get_active_kit_id();
+        if ( ! $kit_id ) {
+            return false;
+        }
+
+        $kit_settings = get_post_meta( $kit_id, '_elementor_page_settings', true );
+        if ( ! is_array( $kit_settings ) ) {
+            $kit_settings = [];
+        }
+
+        // Eredeti system colors megőrzése, csak a custom colors-t cseréljük
+        $label_map = [
+            'primary'            => 'Primary',
+            'accent'             => 'Accent',
+            'dark'               => 'Dark',
+            'dark_gradient_end'  => 'Dark 2',
+            'light'              => 'Light BG',
+            'muted'              => 'Muted Text',
+        ];
+
+        $custom_colors = [];
+        foreach ( $label_map as $key => $label ) {
+            if ( ! empty( $palette[ $key ] ) ) {
+                $custom_colors[] = [
+                    '_id'   => 'aie_' . $key,
+                    'title' => $label,
+                    'color' => sanitize_hex_color( $palette[ $key ] ) ?? $palette[ $key ],
+                ];
+            }
+        }
+
+        if ( empty( $custom_colors ) ) {
+            return false;
+        }
+
+        $kit_settings['custom_colors'] = $custom_colors;
+
+        $result = update_post_meta( $kit_id, '_elementor_page_settings', $kit_settings );
+
+        // Elementor Kit cache törlése
+        if (
+            class_exists( '\Elementor\Plugin' ) &&
+            isset( \Elementor\Plugin::$instance->kits_manager )
+        ) {
+            try {
+                $kit = \Elementor\Plugin::$instance->kits_manager->get_active_kit_for_frontend();
+                if ( $kit ) {
+                    $kit->delete_cache();
+                }
+            } catch ( \Exception $e ) {
+                // Silence – cache törlés sikertelen, nem kritikus
+            }
+        }
+
+        return $result !== false;
+    }
+
+    // ── Média könyvtár kép import ─────────────────────────────────────────────
+
+    /**
+     * Kicseréli az összes loremflickr.com URL-t WordPress média könyvtárbeli képekre.
+     * Az $sections tömböt referencia szerint módosítja.
+     */
+    public function import_page_images( array &$sections, int $post_id ): void {
+        $json_str = wp_json_encode( $sections );
+        if ( ! $json_str ) {
+            return;
+        }
+
+        // Összes loremflickr URL megkeresése
+        preg_match_all( '#https://loremflickr\.com/[^\s"\'\\\\]+#', $json_str, $matches );
+        $urls = array_unique( $matches[0] );
+
+        if ( empty( $urls ) ) {
+            return;
+        }
+
+        $url_map = [];
+        foreach ( $urls as $url ) {
+            // Rövidítsük a URL-t (loremflickr néha visszairányít)
+            $clean_url = strtok( $url, '?' );
+            if ( isset( $url_map[ $clean_url ] ) ) {
+                $url_map[ $url ] = $url_map[ $clean_url ];
+                continue;
+            }
+
+            $attachment_id = $this->sideload_image( $url, $post_id );
+            if ( $attachment_id ) {
+                $local_url       = wp_get_attachment_url( $attachment_id );
+                $url_map[ $url ] = $local_url;
+            }
+        }
+
+        if ( empty( $url_map ) ) {
+            return;
+        }
+
+        // Csere a JSON-ban
+        $updated = str_replace(
+            array_map( 'addcslashes', array_keys( $url_map ), array_fill( 0, count( $url_map ), '/' ) ),
+            array_values( $url_map ),
+            $json_str
+        );
+
+        // Egyszerűbb csere: direkt str_replace
+        $updated  = str_replace( array_keys( $url_map ), array_values( $url_map ), $json_str );
+        $decoded  = json_decode( $updated, true );
+        if ( is_array( $decoded ) ) {
+            $sections = $decoded;
+        }
+    }
+
+    /**
+     * Egy külső URL-ről letölt egy képet és WP média könyvtárba menti.
+     * Visszaadja az attachment ID-t vagy null-t.
+     */
+    public function sideload_image( string $url, int $post_id = 0 ): ?int {
+        // Szükséges WP admin include-ok
+        if ( ! function_exists( 'media_handle_sideload' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+            require_once ABSPATH . 'wp-admin/includes/media.php';
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+        }
+
+        // Letöltés ideiglenes fájlba
+        $tmp = download_url( $url, 30 );
+        if ( is_wp_error( $tmp ) ) {
+            return null;
+        }
+
+        // Fájlnév generálása a URL alapján
+        $url_parts = parse_url( $url );
+        $path      = $url_parts['path'] ?? '';
+        $filename  = 'aie-' . substr( md5( $url ), 0, 8 ) . '.jpg';
+
+        $file_array = [
+            'name'     => $filename,
+            'tmp_name' => $tmp,
+            'error'    => 0,
+            'size'     => filesize( $tmp ),
+        ];
+
+        $id = media_handle_sideload( $file_array, $post_id, '' );
+
+        if ( is_wp_error( $id ) ) {
+            @unlink( $tmp );
+            return null;
+        }
+
+        return $id;
+    }
+
+    /**
+     * Attachment URL lekérése ID-ból (referencia képekhez).
+     */
+    public function get_attachment_url( int $attachment_id ): string {
+        return wp_get_attachment_url( $attachment_id ) ?: '';
+    }
+
+    // ── Cache törlés ──────────────────────────────────────────────────────────
+
     public function clear_elementor_cache( int $post_id ): void {
         if (
             defined( 'ELEMENTOR_VERSION' ) &&
@@ -86,26 +237,19 @@ class DataManager {
         ) {
             \Elementor\Plugin::$instance->files_manager->clear_cache();
         }
-
-        // WordPress saját cache
         clean_post_cache( $post_id );
     }
 
     // ── Privát segédek ────────────────────────────────────────────────────────
 
-    private function get_active_kit_id(): int {
-        // Az Elementor Kit ID-ját a site-options tárolja
+    public function get_active_kit_id(): int {
         $kit_id = (int) get_option( 'elementor_active_kit' );
         return $kit_id > 0 ? $kit_id : 0;
     }
 
-    /**
-     * Kiszedi a színpalettát a Kit settings tömbből.
-     */
     private function extract_colors( array $settings ): array {
         $colors = [];
 
-        // Elementor 3.x+ system colors kulcsa: 'system_colors'
         $system_colors = $settings['system_colors'] ?? [];
         foreach ( $system_colors as $item ) {
             if ( isset( $item['_id'], $item['title'], $item['color'] ) ) {
@@ -117,7 +261,6 @@ class DataManager {
             }
         }
 
-        // Egyedi (custom) színek
         $custom_colors = $settings['custom_colors'] ?? [];
         foreach ( $custom_colors as $item ) {
             if ( isset( $item['_id'], $item['title'], $item['color'] ) ) {
@@ -133,9 +276,6 @@ class DataManager {
         return $colors;
     }
 
-    /**
-     * Kiszedi a tipográfiai beállításokat a Kit settings tömbből.
-     */
     private function extract_typography( array $settings ): array {
         $typography = [];
 
@@ -143,11 +283,11 @@ class DataManager {
         foreach ( $system_typo as $item ) {
             if ( isset( $item['_id'], $item['title'] ) ) {
                 $typography[] = [
-                    'id'        => $item['_id'],
-                    'label'     => $item['title'],
-                    'family'    => $item['typography_typography']['font_family'] ?? '',
-                    'size'      => $item['typography_typography']['font_size']['size'] ?? '',
-                    'weight'    => $item['typography_typography']['font_weight'] ?? '',
+                    'id'     => $item['_id'],
+                    'label'  => $item['title'],
+                    'family' => $item['typography_typography']['font_family'] ?? '',
+                    'size'   => $item['typography_typography']['font_size']['size'] ?? '',
+                    'weight' => $item['typography_typography']['font_weight'] ?? '',
                 ];
             }
         }

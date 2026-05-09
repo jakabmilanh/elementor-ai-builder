@@ -1,7 +1,7 @@
 <?php
 /**
  * Anthropic Claude API kliens.
- * Kompatibilis a messages API v1-el (claude-haiku / sonnet / opus).
+ * Támogatja a szöveges és vision (kép+szöveg) üzeneteket.
  *
  * @package AIE\AI
  */
@@ -18,17 +18,23 @@ class ClaudeClient {
     private const API_VERSION = '2023-06-01';
 
     /**
-     * Küld egy chat kérést a Claude API-nak.
+     * Chat hívás – messages tartalmazhat sima stringet VAGY vision array-t.
      *
-     * @param  array  $messages  [{role:system|user, content:string}, ...]
+     * Vision format (user message content array):
+     * [
+     *   ['type'=>'image', 'source'=>['type'=>'base64','media_type'=>'image/jpeg','data'=>'...']],
+     *   ['type'=>'text', 'text'=>'User message text'],
+     * ]
+     *
+     * @param  array  $messages  [{role:system|user|assistant, content:string|array}, ...]
      * @param  int    $max_tokens  Ha 0, settings értéket használja.
-     * @return string|WP_Error  Az AI nyers szöveges válasza.
+     * @return string|WP_Error
      */
     public function chat( array $messages, int $max_tokens = 0 ): string|WP_Error {
         $settings   = (array) get_option( AIE_OPTION_KEY, [] );
         $api_key    = $settings['claude_api_key'] ?? '';
         $model      = $settings['claude_model']   ?? 'claude-haiku-4-5-20251001';
-        // Modellenként eltérő max output limit — Sonnet sokkal nagyobb oldalt tud generálni
+
         $model_limits = [
             'claude-haiku-4-5-20251001' => 8192,
             'claude-sonnet-4-6'         => 16000,
@@ -46,12 +52,12 @@ class ClaudeClient {
             );
         }
 
-        // Claude: system üzenet külön param, messages csak user/assistant
-        $system          = '';
+        // System üzenet különválasztása
+        $system            = '';
         $filtered_messages = [];
         foreach ( $messages as $msg ) {
             if ( 'system' === $msg['role'] ) {
-                $system = $msg['content'];
+                $system = is_string( $msg['content'] ) ? $msg['content'] : '';
             } else {
                 $filtered_messages[] = $msg;
             }
@@ -97,13 +103,89 @@ class ClaudeClient {
 
         if ( 200 !== $http_code ) {
             $msg = $data['error']['message'] ?? ( 'HTTP ' . $http_code );
-            return new WP_Error(
-                'aie_claude_api_error',
-                $msg,
-                [ 'status' => $http_code ]
-            );
+            return new WP_Error( 'aie_claude_api_error', $msg, [ 'status' => $http_code ] );
         }
 
         return $data['content'][0]['text'] ?? '';
+    }
+
+    /**
+     * Képek (design referenciák) base64 kódolása Claude vision API-hoz.
+     * Átméretezi ha szükséges (Claude optimális: max 1568px a hosszabb oldalon).
+     *
+     * @param  string[] $image_urls  Kép URL-ek tömbje
+     * @return array    Vision content blokkok tömbje
+     */
+    public function prepare_vision_images( array $image_urls ): array {
+        $vision_blocks = [];
+
+        foreach ( array_slice( $image_urls, 0, 3 ) as $url ) {
+            $base64 = $this->fetch_image_as_base64( $url );
+            if ( null === $base64 ) {
+                continue;
+            }
+            $vision_blocks[] = [
+                'type'   => 'image',
+                'source' => [
+                    'type'       => 'base64',
+                    'media_type' => 'image/jpeg',
+                    'data'       => $base64,
+                ],
+            ];
+        }
+
+        return $vision_blocks;
+    }
+
+    /**
+     * Kép letöltése, átméretezése ha nagy, majd base64 kódolása.
+     */
+    private function fetch_image_as_base64( string $url ): ?string {
+        // Letöltés
+        $response = wp_remote_get( $url, [
+            'timeout'   => 20,
+            'sslverify' => true,
+        ] );
+
+        if ( is_wp_error( $response ) ) {
+            return null;
+        }
+
+        $body = wp_remote_retrieve_body( $response );
+        if ( empty( $body ) ) {
+            return null;
+        }
+
+        // Ha GD elérhető, átméretezés
+        if ( function_exists( 'imagecreatefromstring' ) ) {
+            $img = @imagecreatefromstring( $body );
+            if ( $img ) {
+                $w = imagesx( $img );
+                $h = imagesy( $img );
+                $max = 1200;
+
+                if ( $w > $max || $h > $max ) {
+                    $ratio  = min( $max / $w, $max / $h );
+                    $new_w  = (int) round( $w * $ratio );
+                    $new_h  = (int) round( $h * $ratio );
+                    $resized = imagecreatetruecolor( $new_w, $new_h );
+                    imagecopyresampled( $resized, $img, 0, 0, 0, 0, $new_w, $new_h, $w, $h );
+                    imagedestroy( $img );
+
+                    ob_start();
+                    imagejpeg( $resized, null, 82 );
+                    $body = ob_get_clean();
+                    imagedestroy( $resized );
+                } else {
+                    // Konvertálás JPEG-be (ha PNG stb.)
+                    ob_start();
+                    imagejpeg( $img, null, 85 );
+                    $body = ob_get_clean();
+                    imagedestroy( $img );
+                }
+            }
+        }
+
+        return base64_encode( $body );
     }
 }

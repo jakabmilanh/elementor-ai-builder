@@ -42,9 +42,13 @@ final class Plugin {
         $rest_controller = new Api\RestController();
         add_action( 'rest_api_init', [ $rest_controller, 'register_routes' ] );
 
-        // Háttérfeladat-feldolgozó (async generálás) – nopriv kell, mert loopback nincs bejelentkezve
+        // Háttérfeladat-feldolgozó (async generálás)
+        // nopriv kell, mert a loopback kérés nincs bejelentkezve
         add_action( 'wp_ajax_aie_bg_generate',        [ $rest_controller, 'process_bg_job' ] );
         add_action( 'wp_ajax_nopriv_aie_bg_generate', [ $rest_controller, 'process_bg_job' ] );
+
+        // WP-Cron fallback – ha a loopback blokkolva van a szerveren
+        add_action( 'aie_bg_generate_cron', [ $rest_controller, 'cron_process_job' ], 10, 2 );
 
         // Admin settings oldal
         if ( is_admin() ) {
