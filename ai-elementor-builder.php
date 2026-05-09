@@ -14,7 +14,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Konstansok ────────────────────────────────────────────────────────────────
-define( 'AIE_VERSION',     '2.1.0' );
+define( 'AIE_VERSION',     '2.2.0' );
 define( 'AIE_FILE',        __FILE__ );
 define( 'AIE_DIR',         plugin_dir_path( __FILE__ ) );
 define( 'AIE_URL',         plugin_dir_url( __FILE__ ) );
