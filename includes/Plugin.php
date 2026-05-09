@@ -39,15 +39,19 @@ final class Plugin {
 
     private function init_hooks(): void {
         // REST API
-        add_action( 'rest_api_init', [ new Api\RestController(), 'register_routes' ] );
+        $rest_controller = new Api\RestController();
+        add_action( 'rest_api_init', [ $rest_controller, 'register_routes' ] );
+
+        // Háttérfeladat-feldolgozó (async generálás) – nopriv kell, mert loopback nincs bejelentkezve
+        add_action( 'wp_ajax_aie_bg_generate',        [ $rest_controller, 'process_bg_job' ] );
+        add_action( 'wp_ajax_nopriv_aie_bg_generate', [ $rest_controller, 'process_bg_job' ] );
 
         // Admin settings oldal
         if ( is_admin() ) {
             add_action( 'admin_menu', [ new Admin\SettingsPage(), 'register_menu' ] );
         }
 
-        // ── Elementor editor hook-ok – KÖZVETLENÜL regisztrálva ──────────────
-        // Ezek kellenek, mert az Elementor editor nem standard admin oldal:
+        // Elementor editor hook-ok
         add_action( 'elementor/editor/after_enqueue_scripts', [ $this, 'enqueue_editor_panel' ] );
         add_action( 'elementor/editor/footer',                [ $this, 'inject_panel_container' ] );
     }
@@ -66,6 +70,7 @@ final class Plugin {
 
         wp_localize_script( 'aie-editor-panel', 'AIEData', [
             'restUrl'  => rest_url( 'ai-builder/v1/generate' ),
+            'restBase' => rest_url( 'ai-builder/v1' ),
             'nonce'    => wp_create_nonce( 'wp_rest' ),
             'postId'   => isset( $_GET['post'] ) ? (int) $_GET['post'] : 0,
             'hasElPro' => defined( 'ELEMENTOR_PRO_VERSION' ),

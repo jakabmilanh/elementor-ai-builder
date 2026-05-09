@@ -1,8 +1,9 @@
 <?php
 /**
- * Prompt összeállítása – szekciónkénti generálás.
- * 1. lépés: oldal terv (section type lista)
- * 2. lépés: minden szekciót külön kér az AI-tól
+ * Prompt összeállítása – szabad formátumú AI generálás.
+ *
+ * Nincs predefinált template – az AI teljesen szabadon tervezi és
+ * generálja az Elementor szekciók JSON-ját, mint egy standalone weboldalt.
  *
  * @package AIE\AI
  */
@@ -13,106 +14,159 @@ defined( 'ABSPATH' ) || exit;
 
 class PromptBuilder {
 
-    private const VALID_SECTION_TYPES = [
-        'hero-split', 'features-3', 'stats-4', 'about-2col',
-        'process-3steps', 'testimonials-3', 'pricing-3', 'faq', 'cta-dark',
-    ];
-
-    // ── Page plan ────────────────────────────────────────────────────────────
+    // ── Oldal-terv (szabad, nem kötött template típusokhoz) ──────────────────
 
     public function build_plan( string $user_prompt ): array {
-        $types_list = implode( ', ', self::VALID_SECTION_TYPES );
-        $system = <<<SYS
-You are a website architect selecting the optimal sections for a premium landing page.
+        $system = <<<'SYS'
+You are a senior UI/UX designer and conversion specialist planning a premium landing page.
 
-Available section types: {$types_list}
+Your job: Design the perfect page structure for this specific business. Think like a top web agency designer creating a $10,000 website. Every section should serve a purpose in the visitor's journey from "who is this?" to "I need to contact them NOW."
 
-Section descriptions:
-- hero-split: Full-height hero with split layout (text left, image right), statistics
-- features-3: Three main services/features as icon cards
-- stats-4: Four key statistics/numbers as counters
-- about-2col: About/Why Choose Us, two-column (text + image)
-- process-3steps: How it works, 3 numbered steps
-- testimonials-3: Three client testimonials with star ratings
-- pricing-3: Three pricing plans (only if relevant to the business)
-- faq: Frequently asked questions with accordion
-- cta-dark: Dark CTA section — ALWAYS the last section
+For each section provide:
+- "type": unique snake_case identifier (e.g. "hero", "services_cards", "team_intro", "booking_strip", "testimonials_grid", "trust_badges", "faq_accordion", "final_cta")
+- "purpose": what this section achieves in the conversion funnel (1 sentence)
+- "layout": specific layout description (e.g. "full-height split: 55% text left, 45% image right, dark gradient bg", "3-column white cards on light gray bg", "full-width accent color, 4 counters in a row", "centered text + large image, white bg")
+- "content": key content elements (e.g. "h1 headline max 8 words, subtitle 2 sentences, 2 CTAs, 3 stats with icons")
 
-Rules:
-- ALWAYS start with hero-split
-- ALWAYS end with cta-dark
-- Choose 7–9 sections total
-- Choose sections most relevant to the specific industry and request
-- Include pricing-3 only if the business logically has service plans
-- Return ONLY a valid JSON array of section type strings
+Design rules:
+- 6–8 sections total
+- FIRST section must be a strong hero (type containing "hero")
+- LAST section must be a conversion CTA (type containing "cta")
+- Choose sections logical for THIS SPECIFIC business — no generic generic pages
+- Think about the visitor journey: first impression → services → trust → proof → action
+- Be creative: you can add unique sections like a "before/after", "video testimonial", "team", "location_map", "price_calculator", "process_timeline" etc.
+- AVOID just listing generic section names — make them specific to the business
 
-Example output: ["hero-split","features-3","stats-4","about-2col","process-3steps","testimonials-3","faq","cta-dark"]
+Return ONLY a valid JSON array, nothing else:
+[{"type":"...","purpose":"...","layout":"...","content":"..."},...]
 SYS;
 
         return [
             [ 'role' => 'system', 'content' => $system ],
-            [ 'role' => 'user',   'content' => "Select the best sections for this landing page: \"{$user_prompt}\"\n\nReturn ONLY a JSON array, nothing else." ],
+            [ 'role' => 'user',   'content' => "Design the optimal landing page structure for this business: \"{$user_prompt}\"\n\nReturn ONLY the JSON array, nothing else." ],
         ];
     }
 
-    // ── Single section ────────────────────────────────────────────────────────
+    // ── Szekció generálás (teljes design szabadság) ───────────────────────────
 
     public function build_section(
-        string $section_type,
+        array  $section_meta,
         string $user_prompt,
         array  $global_styles,
         bool   $has_pro
     ): array {
-        $colors_str = $this->format_colors( $global_styles['colors'] ?? [] );
-        $example    = $this->get_section_example( $section_type, $has_pro );
-        $rules      = $this->get_section_rules( $section_type, $has_pro );
-        $user_msg   = $this->get_section_user_message( $section_type, $user_prompt, $has_pro );
+        $section_type    = $section_meta['type']    ?? 'section';
+        $section_purpose = $section_meta['purpose'] ?? '';
+        $section_layout  = $section_meta['layout']  ?? '';
+        $section_content = $section_meta['content'] ?? '';
+
+        $colors_str  = $this->format_colors( $global_styles['colors'] ?? [] );
+        $pro_note    = $has_pro
+            ? 'Elementor PRO is active — you can use ALL widgets: flip-box, animated-headline, price-table, nav-menu, posts, forms, etc.'
+            : 'Elementor FREE only — available widgets: text-editor, heading, image, button, icon-box, icon-list, counter, testimonial, accordion, divider, spacer, star-rating, image-box, video, google_maps, social-icons, progress, tabs, toggle.';
+
+        $elementor_ref = $this->get_elementor_reference();
 
         $system = <<<SYS
-You are a senior Elementor developer generating ONE premium Elementor section.
+You are a senior Elementor developer building a REAL production website for a paying client. Your output goes directly onto a live website — it must be visually stunning, conversion-focused, and professional.
 
 ## OUTPUT FORMAT — CRITICAL
-Respond with ONLY a single root container JSON object: {"id":"...","elType":"container","isInner":false,...}
-- Do NOT wrap in an array
-- Do NOT add {"elementor_data": ...} wrapper
-- No markdown fences, no explanation
-- Pure JSON, starting with { and ending with }
+Return ONLY a single root JSON container object: {"id":"...","elType":"container","isInner":false,...}
+- NO array wrapper, NO {"elementor_data":...} wrapper
+- NO markdown fences, NO explanations
+- Pure JSON starting with { and ending with }
 
-## ELEMENTOR STRUCTURE
-- Root section: elType=container, isInner=false
-- Columns/rows inside: elType=container, isInner=true
-- Widgets: elType=widget, valid widgetType, elements=[]
-- IDs: EXACTLY 7 chars, unique, lowercase alphanumeric — generate random-looking IDs like "a3f9k2m"
-- flex_direction: "row" for horizontal, "column" for vertical
+## ELEMENTOR JSON STRUCTURE
+{$elementor_ref}
 
-## DESIGN SYSTEM
-- Dark gradient: background_color #0a0e27 → background_color_b #1a2a5e, gradient_angle 135deg
-- Light section: background_color #f5f6fa
-- White section: background_color #ffffff
-- Accent color: #e94560
-- Dark text: #1a1a2e | Muted text: #5a6a7a
-- Section label: 12px, weight 700, uppercase, letter-spacing 2px, color #e94560
-- h2: 44px weight 700 | h3: 22px weight 700 | body: 17px line-height 1.7
-- Card style: white bg, border_radius 16px, box_shadow {horizontal:0,vertical:8,blur:32,spread:0,color:"rgba(0,0,0,0.08)"}
-- Section padding top/bottom: 100px standard | hero/CTA: 120px
+## DESIGN FREEDOM
+You have FULL creative freedom. Design this like a senior designer at a top agency:
+- Choose any layout that fits the section's purpose (split, asymmetric, full-bleed, cards, grid, etc.)
+- Use visual hierarchy: make the most important thing biggest and most prominent
+- Use generous whitespace — it signals quality
+- Create visual interest: varied backgrounds, accent colors, subtle shadows
+- Every element should earn its place — no filler content
 
-## IMAGE RULES — CRITICAL
-- NEVER set background_image on any container (solid or gradient only)
-- ALL images MUST use the image widget with this URL format:
-  https://loremflickr.com/{width}/{height}/{keyword1},{keyword2},{keyword3}
-- Keywords MUST match the page industry and content (e.g., dental,dentist,clinic for a dental page)
-- Portrait/avatar images: 120x120 with keywords like portrait,professional,person
-- Section images: 700x560 | Hero image: 750x620
+## DESIGN STANDARDS
+- Section padding: 80–120px top/bottom (hero: can be 0 if full-height; CTA: 100–140px)
+- Inner container max-width: use content_width "boxed" for readable content areas (max ~1200px)
+- Full-bleed elements: use content_width "full" for background-only containers
+- Cards: white background, border-radius 12–20px, box-shadow: {horizontal:0,vertical:8,blur:32,spread:0,color:"rgba(0,0,0,0.08)"}
+- Column gaps: 24–48px between equal columns; 48–80px for split layouts
+- Heading sizes: h1 52–72px weight 800, h2 36–52px weight 700, h3 20–26px weight 700
+- Body text: 15–17px, line-height {"size":1.7,"unit":"em"}
+- Buttons: padding top/bottom 14–18px, left/right 32–48px, border-radius 6–10px, font-weight 700
 
+## COLOR SYSTEM
 {$colors_str}
 
-## SECTION-SPECIFIC RULES
-{$rules}
+## ⚠️ COLOR CONTRAST — ABSOLUTE RULES — NEVER VIOLATE
+Violating these creates broken, unusable designs. Check EVERY text color against its parent background.
 
-## REFERENCE EXAMPLE
-Study this for structure, settings keys, and premium patterns. You are FREE to improve and adapt:
-{$example}
+RULE 1 — DARK BACKGROUND → MUST use LIGHT text:
+  Dark backgrounds: #0a0e27, #1a1a2e, #1a2a5e, #0f3460, #12122a, #111111, #222222, #333333,
+  or ANY color where the average of (R+G+B)/3 < 80
+  → text_color, color, typography_color MUST be: #ffffff OR rgba(255,255,255,0.85) or higher
+  → For secondary/muted text on dark bg: rgba(255,255,255,0.72) — still light!
+  → FORBIDDEN dark text on dark bg: #1a1a2e, #5a6a7a, #333, #000, or similar dark colors
+
+RULE 2 — LIGHT/WHITE BACKGROUND → MUST use DARK text:
+  Light backgrounds: #ffffff, #f5f6fa, #f0f0f0, #fafafa, #eeeeee,
+  or ANY color where the average of (R+G+B)/3 > 180
+  → text_color MUST be: #1a1a2e (headings), #5a6a7a (body/muted), #333333
+  → FORBIDDEN light text on light bg: #ffffff, rgba(255,255,255,...), #f5f6fa as text
+
+RULE 3 — ACCENT BACKGROUND → white text:
+  Accent: #e94560, #c0233e, any saturated/vivid color (high saturation)
+  → Text MUST be: #ffffff
+
+RULE 4 — GRADIENT BACKGROUNDS → use the DARKEST color to determine text:
+  Dark gradient (#0a0e27 → #1a2a5e): white text required
+  Accent gradient (#e94560 → #c0233e): white text required
+
+RULE 5 — WHITE CARDS inside ANY section:
+  Cards always have white (#ffffff) background → text must be dark (#1a1a2e, #5a6a7a)
+  Even if the card is inside a dark section — the card itself is white → dark text inside
+
+RULE 6 — ICONS must also contrast with their container background:
+  Icon on dark bg → icon_color: #ffffff or accent #e94560
+  Icon on white/light bg → icon_color: accent #e94560 or dark #1a1a2e
+
+## IMAGE RULES
+- NEVER set background_image on containers (use solid color or gradient backgrounds only)
+- ALL images via image widget with URL: https://loremflickr.com/{width}/{height}/{kw1},{kw2},{kw3}
+- Use industry-specific keywords from the business description (e.g., dental,dentist,teeth for a dental page)
+- Portrait/avatar images: 120×120 with "portrait,professional,person"
+- Section images: 700×560 or 800×600
+- Hero images: 750×620 or 900×700
+- ALWAYS set alt text to a meaningful description
+
+## WIDGET IDs
+- EXACTLY 7 characters, unique, lowercase alphanumeric
+- Random-looking (not sequential): "a3f9k2m", "x7p2r4s", "b5n8q1j"
+- Every container and widget needs a unique ID — no duplicates
+
+## {$pro_note}
 SYS;
+
+        $user_msg = <<<MSG
+Build this Elementor section for the website: "{$user_prompt}"
+
+SECTION BRIEF:
+- Section type: {$section_type}
+- Purpose: {$section_purpose}
+- Layout: {$section_layout}
+- Content to include: {$section_content}
+
+REQUIREMENTS:
+1. Write ALL content in the SAME LANGUAGE as the business description ("{$user_prompt}")
+2. Every piece of text must be specific to this exact business — NO generic placeholder text like "Lorem ipsum" or "Your Company Name"
+3. Apply ALL color contrast rules — verify every text element against its background before finalizing
+4. The layout hint is a suggestion — improve it if you see a better approach for this section type
+5. Make it look like a world-class website
+
+Return ONLY the single root container JSON object. Start with { and end with }.
+MSG;
 
         return [
             [ 'role' => 'system', 'content' => $system ],
@@ -120,303 +174,151 @@ SYS;
         ];
     }
 
-    // ── Modify mode ───────────────────────────────────────────────────────────
+    // ── Módosítás ─────────────────────────────────────────────────────────────
 
     public function build_modify(
         string $user_prompt,
         string $current_json,
         array  $global_styles
     ): array {
-        $colors_str     = $this->format_colors( $global_styles['colors'] ?? [] );
-        $json_preview   = $this->maybe_truncate_json( $current_json );
+        $colors_str   = $this->format_colors( $global_styles['colors'] ?? [] );
+        $json_preview = $this->maybe_truncate_json( $current_json );
 
         $system = <<<SYS
 You are a senior Elementor developer modifying an existing page.
 
 OUTPUT: {"elementor_data":[...complete modified page...]}
-No markdown. Pure JSON only.
+No markdown fences. Pure JSON only.
 
 RULES:
-- Apply ONLY the requested changes, preserve everything else
-- Keep all existing IDs; new elements get new unique 7-char IDs
-- NEVER use background_image on containers
-- ALL images: image widget with loremflickr.com URL
-- Return the COMPLETE modified JSON
+- Apply ONLY the requested changes, preserve everything else exactly
+- Keep all existing element IDs; new elements get unique 7-char random-looking IDs
+- NEVER use background_image on containers (solid color or gradient only)
+- ALL images: image widget with https://loremflickr.com/{w}/{h}/{keywords} URL
+- Apply color contrast: dark bg → white/light text; light/white bg → dark text
+- Return the COMPLETE modified JSON, including unchanged sections
 
 {$colors_str}
 SYS;
 
         return [
             [ 'role' => 'system', 'content' => $system ],
-            [ 'role' => 'user', 'content' => "Current JSON:\n{$json_preview}\n\nInstruction: \"{$user_prompt}\"\n\nReturn ONLY the complete modified JSON." ],
+            [ 'role' => 'user', 'content' => "Current Elementor JSON:\n{$json_preview}\n\nModification instruction: \"{$user_prompt}\"\n\nReturn ONLY the complete modified JSON." ],
         ];
     }
 
-    // ── Section examples (TemplateLibrary alapján) ────────────────────────────
+    // ── Elementor widget referencia ───────────────────────────────────────────
 
-    private function get_section_example( string $section_type, bool $has_pro ): string {
-        TemplateLibrary::reset_ids();
+    private function get_elementor_reference(): string {
+        return <<<'REF'
+### Root section container (elType: "container", isInner: false)
+{
+  "id": "a3f9k2m",
+  "elType": "container",
+  "isInner": false,
+  "settings": {
+    "content_width": "full",           // "full" = 100% wide; "boxed" = max-width centered (~1200px)
+    "flex_direction": "column",        // "row" or "column"
+    "flex_align_items": "center",      // "flex-start" | "center" | "flex-end" | "stretch"
+    "flex_justify_content": "center",  // "flex-start" | "center" | "flex-end" | "space-between" | "space-around"
+    "gap": {"size": 0, "unit": "px"},
+    "padding": {"top":"100","bottom":"100","left":"0","right":"0","unit":"px","isLinked":false},
+    "background_color": "#f5f6fa",
+    "min_height": {"size": 100, "unit": "vh"}
+  },
+  "elements": []
+}
 
-        $ex = match ( $section_type ) {
-            'hero-split'     => TemplateLibrary::hero_split( [
-                'label'         => '// PROFESSIONAL SERVICES',
-                'h1'            => 'Premium Services That Deliver Real Results',
-                'subtitle'      => 'Over a decade of experience helping clients achieve their goals.',
-                'button_text'   => 'Get Started Today',
-                'stat_1_number' => 1500, 'stat_1_suffix' => '+', 'stat_1_label' => 'Happy Clients',
-                'stat_2_number' => 10,   'stat_2_suffix' => '+', 'stat_2_label' => 'Years Experience',
-                'stat_3_number' => 98,   'stat_3_suffix' => '%', 'stat_3_label' => 'Satisfaction Rate',
-                'image_seed'    => 'professional,business,team',
-            ] ),
-            'features-3'     => TemplateLibrary::features_3( [
-                'section_label'    => '// OUR SERVICES',
-                'section_h2'       => 'Everything You Need to Succeed',
-                'section_subtitle' => 'Comprehensive solutions designed around your specific goals.',
-                'card_1_icon'      => 'fas fa-chart-line',
-                'card_1_title'     => 'Strategic Planning',
-                'card_1_desc'      => 'Data-driven strategies that align with your goals and drive measurable growth.',
-                'card_2_icon'      => 'fas fa-handshake',
-                'card_2_title'     => 'Expert Consultation',
-                'card_2_desc'      => 'Personalized guidance from seasoned professionals with years of experience.',
-                'card_3_icon'      => 'fas fa-award',
-                'card_3_title'     => 'Proven Results',
-                'card_3_desc'      => 'A consistent track record of measurable outcomes and satisfied clients.',
-            ], $has_pro ),
-            'stats-4'        => TemplateLibrary::stats_4( [
-                'stat_1_number' => 2500, 'stat_1_suffix' => '+', 'stat_1_label' => 'Satisfied Clients',
-                'stat_2_number' => 15,   'stat_2_suffix' => '+', 'stat_2_label' => 'Years in Business',
-                'stat_3_number' => 98,   'stat_3_suffix' => '%', 'stat_3_label' => 'Client Satisfaction',
-                'stat_4_number' => 50,   'stat_4_suffix' => '+', 'stat_4_label' => 'Awards Won',
-            ] ),
-            'about-2col'     => TemplateLibrary::about_2col( [
-                'section_label'    => '// WHY CHOOSE US',
-                'section_h2'       => 'A Team You Can Trust',
-                'section_subtitle' => 'We combine expertise with a genuine commitment to your success.',
-                'benefit_1'        => 'Industry-leading expertise and knowledge',
-                'benefit_2'        => 'Personalized approach for every client',
-                'benefit_3'        => 'Transparent process and clear communication',
-                'benefit_4'        => 'Proven track record with 2500+ clients',
-                'button_text'      => 'Learn More About Us',
-                'image_seed'       => 'professional,office,team',
-            ] ),
-            'process-3steps' => TemplateLibrary::process_3steps( [
-                'section_label'    => '// HOW IT WORKS',
-                'section_h2'       => 'Simple. Effective. Results-Driven.',
-                'section_subtitle' => 'Our proven 3-step process makes getting started easy.',
-                'step_1_title'     => 'Initial Consultation',
-                'step_1_desc'      => 'We begin with a thorough assessment of your needs and goals.',
-                'step_2_title'     => 'Custom Strategy',
-                'step_2_desc'      => 'Our experts develop a tailored plan designed for your specific situation.',
-                'step_3_title'     => 'Ongoing Results',
-                'step_3_desc'      => 'We implement, monitor, and continuously optimize for the best outcomes.',
-            ] ),
-            'testimonials-3' => TemplateLibrary::testimonials_3( [
-                'section_label'    => '// CLIENT REVIEWS',
-                'section_h2'       => 'What Our Clients Say',
-                'section_subtitle' => 'Real experiences from people who have trusted us with their goals.',
-                'test_1_text'      => 'Absolutely exceeded every expectation. The team is professional, caring, and genuinely invested in your success. I cannot recommend them highly enough.',
-                'test_1_name'      => 'Sarah Johnson',
-                'test_1_job'       => 'Marketing Director',
-                'test_1_seed'      => 'portrait,woman,professional',
-                'test_2_text'      => 'The results speak for themselves. From day one I knew I was in good hands. Outstanding service and remarkable expertise throughout.',
-                'test_2_name'      => 'Michael Thompson',
-                'test_2_job'       => 'Business Owner',
-                'test_2_seed'      => 'portrait,man,professional',
-                'test_3_text'      => 'I\'ve worked with many firms before, but none compare to this level of dedication and quality. Truly exceptional experience.',
-                'test_3_name'      => 'Emily Rodriguez',
-                'test_3_job'       => 'Senior Manager',
-                'test_3_seed'      => 'portrait,woman,executive',
-            ] ),
-            'faq'            => TemplateLibrary::faq_accordion( [
-                'section_label'    => '// FREQUENTLY ASKED',
-                'section_h2'       => 'Got Questions? We Have Answers.',
-                'section_subtitle' => 'Everything you need to know before getting started.',
-                'button_text'      => 'Ask Us Anything',
-                'q1'               => 'How do I get started?',
-                'a1'               => 'Simply contact us through the form above or give us a call. We\'ll schedule a free initial consultation to discuss your needs.',
-                'q2'               => 'What does your service cost?',
-                'a2'               => 'Pricing depends on your specific requirements. After our initial consultation, we provide a detailed, transparent quote with no hidden fees.',
-                'q3'               => 'How long does the process take?',
-                'a3'               => 'Timelines vary based on the scope of work. Most projects begin showing results within the first few weeks.',
-                'q4'               => 'Do you offer a guarantee?',
-                'a4'               => 'Yes. We stand behind our work 100%. If you\'re not satisfied, we\'ll work tirelessly to make it right.',
-            ] ),
-            'cta-dark'       => TemplateLibrary::cta_dark( [
-                'label'       => '// TAKE THE NEXT STEP',
-                'h2'          => 'Ready to Transform Your Results?',
-                'subtitle'    => 'Join thousands of satisfied clients. Your success story starts with one conversation.',
-                'button_text' => 'Book a Free Consultation',
-            ] ),
-            default          => '{}',
-        };
+### Inner column/row container (elType: "container", isInner: true)
+{
+  "id": "b5n8q1j",
+  "elType": "container",
+  "isInner": true,
+  "settings": {
+    "content_width": "boxed",
+    "flex_direction": "row",
+    "width": {"size": 50, "unit": "%"},
+    "gap": {"size": 32, "unit": "px"},
+    "padding": {"top":"36","bottom":"36","left":"36","right":"36","unit":"px","isLinked":false},
+    "background_color": "#ffffff",
+    "border_radius": {"top":"16","right":"16","bottom":"16","left":"16","unit":"px","isLinked":false},
+    "box_shadow_box_shadow_type": "yes",
+    "box_shadow_box_shadow": {"horizontal":0,"vertical":8,"blur":32,"spread":0,"color":"rgba(0,0,0,0.08)","position":""}
+  },
+  "elements": []
+}
 
-        return json_encode( $ex, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
+### GRADIENT BACKGROUND on any container:
+"background_background": "gradient",
+"background_color": "#0a0e27",
+"background_color_b": "#1a2a5e",
+"background_gradient_angle": {"size": 135, "unit": "deg"},
+"background_gradient_type": "linear"
+
+### AVAILABLE WIDGETS (elType: "widget", elements: [])
+
+heading:
+{"id":"x7p2r4s","elType":"widget","widgetType":"heading","settings":{"title":"Your Headline","header_size":"h2","align":"left","color":"#1a1a2e","typography_font_size":{"size":44,"unit":"px"},"typography_font_weight":"700","typography_line_height":{"size":1.15,"unit":"em"}},"elements":[]}
+
+text-editor:
+{"id":"c4m7p9x","elType":"widget","widgetType":"text-editor","settings":{"editor":"<p>Your paragraph text here.</p>","align":"left","color":"#5a6a7a","typography_font_size":{"size":17,"unit":"px"},"typography_line_height":{"size":1.7,"unit":"em"}},"elements":[]}
+
+button:
+{"id":"d2k5r8n","elType":"widget","widgetType":"button","settings":{"text":"Click Here","link":{"url":"#","is_external":false},"align":"left","background_color":"#e94560","button_text_color":"#ffffff","border_radius":{"top":"8","right":"8","bottom":"8","left":"8","unit":"px","isLinked":true},"typography_font_size":{"size":15,"unit":"px"},"typography_font_weight":"700","padding":{"top":"16","bottom":"16","left":"40","right":"40","unit":"px","isLinked":false}},"elements":[]}
+
+image:
+{"id":"e8j3f6m","elType":"widget","widgetType":"image","settings":{"image":{"url":"https://loremflickr.com/700/560/keyword1,keyword2","alt":"Description"},"width":{"size":100,"unit":"%"},"align":"center","border_radius":{"top":"16","right":"16","bottom":"16","left":"16","unit":"px","isLinked":true}},"elements":[]}
+
+icon-box:
+{"id":"f1n4q7k","elType":"widget","widgetType":"icon-box","settings":{"selected_icon":{"value":"fas fa-star","library":"fa-solid"},"title_text":"Feature Title","description_text":"Feature description text goes here.","icon_size":{"size":44,"unit":"px"},"icon_color":"#e94560","title_size":"h3","title_color":"#1a1a2e","description_color":"#5a6a7a","title_typography_font_size":{"size":20,"unit":"px"},"title_typography_font_weight":"700"},"elements":[]}
+
+icon-list:
+{"id":"g6p9s2w","elType":"widget","widgetType":"icon-list","settings":{"icon_list":[{"text":"Benefit one","selected_icon":{"value":"fas fa-check-circle","library":"fa-solid"}},{"text":"Benefit two","selected_icon":{"value":"fas fa-check-circle","library":"fa-solid"}}],"icon_color":"#e94560","text_color":"#5a6a7a","icon_size":{"size":18,"unit":"px"},"space_between":{"size":12,"unit":"px"},"typography_font_size":{"size":16,"unit":"px"}},"elements":[]}
+
+counter:
+{"id":"h3t6v9y","elType":"widget","widgetType":"counter","settings":{"starting_number":0,"ending_number":1500,"suffix":"+","title":"Happy Clients","number_color":"#ffffff","number_size":{"size":52,"unit":"px"},"number_typography_font_weight":"800","title_color":"rgba(255,255,255,0.72)","title_size":{"size":14,"unit":"px"}},"elements":[]}
+
+testimonial:
+{"id":"i5w8z1a","elType":"widget","widgetType":"testimonial","settings":{"content":"Client testimonial text here. Specific and genuine sounding.","name":"Client Name","job":"Job Title","image":{"url":"https://loremflickr.com/120/120/portrait,professional,person","alt":"Client photo"},"content_color":"#5a6a7a","name_color":"#1a1a2e","job_color":"#e94560","typography_font_size":{"size":15,"unit":"px"},"typography_line_height":{"size":1.65,"unit":"em"}},"elements":[]}
+
+star-rating:
+{"id":"j2x5b8e","elType":"widget","widgetType":"star-rating","settings":{"rating":5,"star_color":"#f5a623","unmarked_star_color":"rgba(245,166,35,0.25)","icon_size":{"size":18,"unit":"px"},"align":"left"},"elements":[]}
+
+accordion:
+{"id":"k7c1f4h","elType":"widget","widgetType":"accordion","settings":{"tabs":[{"tab_title":"Question one?","tab_content":"<p>Answer to question one. Be helpful and specific.</p>"},{"tab_title":"Question two?","tab_content":"<p>Answer to question two.</p>"}],"title_color":"#1a1a2e","icon_color":"#e94560","active_color":"#e94560","content_color":"#5a6a7a","item_spacing":{"size":4,"unit":"px"},"typography_font_size":{"size":16,"unit":"px"},"typography_font_weight":"600"},"elements":[]}
+
+divider:
+{"id":"l4g7j0m","elType":"widget","widgetType":"divider","settings":{"color":"rgba(0,0,0,0.08)","weight":{"size":1,"unit":"px"},"gap":{"size":0,"unit":"px"}},"elements":[]}
+
+spacer:
+{"id":"m9h2k5p","elType":"widget","widgetType":"spacer","settings":{"space":{"size":32,"unit":"px"}},"elements":[]}
+REF;
     }
 
-    // ── Section design rules ──────────────────────────────────────────────────
-
-    private function get_section_rules( string $section_type, bool $has_pro ): string {
-        return match ( $section_type ) {
-            'hero-split' => <<<R
-- Root container: content_width="full", background=dark gradient (#0a0e27→#1a2a5e), min_height={size:100,unit:"vh"}
-- Inner row container: content_width="boxed", flex_direction="row", gap=60px, padding top/bottom 100px
-- Left column (52%): flex_direction=column, items flex-start
-  → Section label text-editor (accent, 12px, uppercase)
-  → h1 widget (white, 62px, 800 weight, line-height 1.1)
-  → subtitle text-editor (rgba(255,255,255,0.72), 18px, 1.7lh)
-  → button widget (accent bg #e94560, white text, padding 16px 40px, radius 8px)
-  → Stats row: inner container flex-direction=row, 3 counter widgets (white number 40px, label 13px)
-- Right column (44%): image widget with loremflickr.com, 750x620, industry keywords, border-radius 20px
-R,
-            'features-3' => $has_pro
-                ? <<<R
-- Root: content_width="boxed", background #f5f6fa, padding top/bottom 100px
-- Section intro block: centered label + h2 (44px) + subtitle (17px)
-- Card row: flex-direction=row, gap=28px, 3 flip-box PRO widgets (not icon-box!)
-- flip-box cards: white front, accent back (#e94560), border-radius 16px
-- Front: industry-relevant FA icon (48px, accent), title h3 (20px), short description
-- Back: detailed description + "Book Now" / "Learn More" button
-R
-                : <<<R
-- Root: content_width="boxed", background #f5f6fa, padding top/bottom 100px
-- Section intro block: centered label + h2 (44px) + subtitle (17px)
-- Card row inner container: flex-direction=row, gap=28px
-- 3 card inner containers (each ~30% width):
-  → white bg, border-radius 16px, padding 36px, box-shadow
-  → icon-box widget: industry-specific FA icon (44px, accent #e94560), title (20px 700w), 2-sentence description
-R,
-            'stats-4' => <<<R
-- Root: content_width="full", accent gradient bg (#e94560→#c0233e, 135deg), padding top/bottom 80px
-- Inner row: content_width="boxed", flex-direction=row, justify=space-around
-- 4 stat containers: flex-direction=column, flex-align=center
-  → counter widget: starting_number=0, ending_number=INTEGER, suffix, title
-  → number_color=#ffffff, number_size=52px weight 800
-  → title_color=rgba(255,255,255,0.70), title_size=14px
-R,
-            'about-2col' => <<<R
-- Root: content_width="boxed", white bg, padding top/bottom 100px
-- Row inner: flex-direction=row, gap=64px
-- Left column (50%): flex-direction=column, items flex-start
-  → Section label (left-aligned, accent, 12px uppercase)
-  → h2 (left-aligned, dark, 40px 700w)
-  → subtitle text-editor (muted, 17px)
-  → icon-list widget: 4 benefit items with fa-check-circle icons (accent color)
-  → button (accent bg, padding 14px 36px)
-- Right column (46%): image widget loremflickr.com 700x560, border-radius 20px, box-shadow
-R,
-            'process-3steps' => <<<R
-- Root: content_width="boxed", bg #f5f6fa, padding top/bottom 100px
-- Section intro: centered label + h2 + subtitle
-- Card row: flex-direction=row, gap=28px
-- 3 step cards (each ~30%):
-  → white bg, border-radius 16px, padding 40px, box-shadow
-  → Step number: text-editor "01" / "02" / "03" (accent color, 52px, 800w)
-  → h3 heading (step title, dark, 22px)
-  → text-editor description (muted, 15px, 1.65lh)
-R,
-            'testimonials-3' => <<<R
-- Root: content_width="boxed", white bg, padding top/bottom 100px
-- Section intro: centered label + h2 + subtitle
-- Card row: flex-direction=row, gap=28px
-- 3 testimonial cards (each ~30%):
-  → white bg, border-radius 16px, padding 36px, box-shadow
-  → star-rating widget (5 stars, gold #f5a623, 18px, align=left)
-  → testimonial widget: real 2-3 sentence quote, avatar image (loremflickr 120x120 portrait keywords), name, job
-  → content_color=#5a6a7a, name_color=#1a1a2e, job_color=#e94560
-R,
-            'pricing-3' => <<<R
-- Root: content_width="boxed", bg #f5f6fa, padding top/bottom 100px
-- Section intro: centered label + h2 + subtitle
-- Card row: flex-direction=row, gap=28px
-- 3 pricing cards (each ~30%), middle card featured (accent bg or different style)
-- Each card: white bg, border-radius 16px, padding 40px, box-shadow
-  → Plan name heading h3 (dark, 22px)
-  → Price: large text-editor (accent color, 52px, 800w, "$ / month")
-  → Features: icon-list with check-circle icons, 4-5 features
-  → button (accent bg, full-width)
-R,
-            'faq' => <<<R
-- Root: content_width="boxed", bg #f5f6fa, padding top/bottom 100px
-- Row inner: flex-direction=row, gap=64px
-- Left (38%): flex-direction=column, items flex-start
-  → Section label + h2 (38px) + subtitle + button
-- Right (57%): accordion widget
-  → 4-5 real, industry-relevant Q&A items
-  → title_color=#1a1a2e, icon_color=#e94560, active_color=#e94560, content_color=#5a6a7a
-R,
-            'cta-dark' => <<<R
-- Root: content_width="boxed", dark gradient bg (#0a0e27→#1a1a2e, 135deg), padding top/bottom 120px
-- flex_direction=column, flex_align=center, text_align=center
-- Elements (centered):
-  → Label text-editor (accent, 12px, uppercase, letter-spacing 2px)
-  → h2 heading (white, 48px, 800w, centered)
-  → subtitle text-editor (rgba(255,255,255,0.72), 18px, centered)
-  → button (accent bg #e94560, white text, size xl, padding 18px 48px)
-R,
-            default => '- Follow standard Elementor container best practices.',
-        };
-    }
-
-    // ── Section user messages ─────────────────────────────────────────────────
-
-    private function get_section_user_message( string $section_type, string $user_prompt, bool $has_pro ): string {
-        $pro_note = $has_pro
-            ? 'Elementor Pro IS active.'
-            : 'Elementor Pro is NOT active — use only Free widgets.';
-
-        $content_guide = match ( $section_type ) {
-            'hero-split'     => "Content to generate:\n- Section label: short uppercase tagline specific to this industry\n- H1 headline: max 7 powerful words, specific to the business\n- Subtitle: 1-2 sentences expanding on the headline\n- CTA button text: action-oriented\n- 3 relevant statistics for this industry (with realistic numbers)\n- Hero image: loremflickr.com 750x620 with 3 industry-specific keywords",
-            'features-3'     => "Content to generate:\n- Section label + h2 + subtitle\n- 3 main services or features of this specific business\n- Each card: industry-specific Font Awesome icon, short title, 2-sentence description\n- Icons must match the specific industry (e.g., fas fa-tooth for dental, fas fa-chart-line for finance)",
-            'stats-4'        => "Content to generate:\n- 4 impressive statistics relevant to this specific business/industry\n- Use realistic numbers (not too round, not too extreme)\n- Examples for dental: patients treated, years experience, satisfaction rate, procedures\n- ending_number MUST be an integer (no quotes)",
-            'about-2col'     => "Content to generate:\n- 'Why Choose Us' or 'About Us' framing specific to this business\n- 4 real benefits/differentiators (not generic)\n- CTA button text\n- Image: loremflickr.com 700x560 with industry keywords (office/team/professional)",
-            'process-3steps' => "Content to generate:\n- 'How it works' or booking/treatment process for this specific industry\n- 3 concrete, real steps a new client would go through\n- Each step: specific title and 2-sentence description of what happens",
-            'testimonials-3' => "Content to generate:\n- 3 realistic testimonials specific to this industry and service\n- Each quote: 2-3 sentences, mentions a specific benefit or result\n- Real-sounding names (mix of genders, fits the local culture of the prompt language)\n- Portrait images: loremflickr.com 120x120 with 'portrait,professional' keywords",
-            'pricing-3'      => "Content to generate:\n- 3 pricing tiers relevant to this specific business type\n- Plan names (e.g., Basic / Professional / Premium or similar)\n- Realistic prices for this industry\n- 4-5 features per plan that reflect actual service differences",
-            'faq'            => "Content to generate:\n- 4-5 real questions actual customers of this business would ask\n- Helpful, informative answers (2-4 sentences each)\n- Questions about: pricing, process, what to expect, guarantees, first steps",
-            'cta-dark'       => "Content to generate:\n- Compelling headline (max 8 words) creating urgency or excitement\n- Subtitle: 1-2 sentences with social proof or reassurance\n- CTA button: action-oriented, specific to this business",
-            default          => '',
-        };
-
-        return <<<MSG
-Generate a premium {$section_type} section for this business: "{$user_prompt}"
-
-{$content_guide}
-
-Important:
-- Write ALL text in the SAME LANGUAGE as the business description above
-- Content must be specific to this industry — no generic placeholder text
-- {$pro_note}
-- Image URLs: https://loremflickr.com/{{width}}/{{height}}/{{keyword1}},{{keyword2}},{{keyword3}} — use specific industry keywords
-
-Respond with ONLY the single root container JSON object.
-MSG;
-    }
-
-    // ── Formázók ─────────────────────────────────────────────────────────────
+    // ── Segédmetódusok ────────────────────────────────────────────────────────
 
     private function format_colors( array $colors ): string {
         if ( empty( $colors ) ) {
-            return '## Site Colors: use defaults — dark #1a1a2e, accent #e94560, muted #5a6a7a, light #f5f6fa';
+            return implode( "\n", [
+                '## Site Color Palette',
+                '- Dark/Background: #1a1a2e (headings, dark sections)',
+                '- Accent/Primary: #e94560 (buttons, icons, highlights, labels)',
+                '- Muted/Body text: #5a6a7a (paragraphs, descriptions on white bg)',
+                '- Light section bg: #f5f6fa',
+                '- White: #ffffff (cards, light sections)',
+                '- Dark gradient: from #0a0e27 to #1a2a5e at 135°',
+                '- Accent gradient: from #e94560 to #c0233e at 135°',
+                '',
+                'Text on dark bg (#0a0e27, #1a1a2e, etc.): use #ffffff or rgba(255,255,255,0.72+)',
+                'Text on light bg (#f5f6fa, #ffffff): use #1a1a2e or #5a6a7a',
+            ] );
         }
-        $lines = [ '## Site Global Colors (use these exactly)' ];
+        $lines = [ '## Site Global Colors (use these — consistent with site brand)' ];
         foreach ( $colors as $c ) {
             $lines[] = '- ' . ( $c['label'] ?? 'Color' ) . ': ' . ( $c['value'] ?? '' );
         }
-        return implode( "\n", $lines );
-    }
-
-    private function format_typography( array $typography ): string {
-        if ( empty( $typography ) ) {
-            return '';
-        }
-        $lines = [ '## Site Typography' ];
-        foreach ( $typography as $t ) {
-            $parts = [ '- ' . ( $t['label'] ?? 'Type' ) ];
-            if ( ! empty( $t['family'] ) ) $parts[] = 'Font: ' . $t['family'];
-            if ( ! empty( $t['size'] ) )   $parts[] = 'Size: ' . $t['size'] . 'px';
-            if ( ! empty( $t['weight'] ) ) $parts[] = 'Weight: ' . $t['weight'];
-            $lines[] = implode( ' | ', $parts );
-        }
+        $lines[] = '';
+        $lines[] = 'Apply contrast rules: dark bg → light text; light bg → dark text.';
         return implode( "\n", $lines );
     }
 

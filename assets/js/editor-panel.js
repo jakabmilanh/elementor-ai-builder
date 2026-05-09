@@ -1,6 +1,6 @@
 /**
  * AI Elementor Builder – Editor Panel
- * Kompatibilis Elementor 3.30+ konténer-alapú felülettel.
+ * Async generation with polling — no more 504 timeouts.
  */
 (function ($) {
     'use strict';
@@ -130,6 +130,13 @@
                         ✨ Generálás
                     </button>
 
+                    <!-- Progress bar -->
+                    <div id="aie-progress-wrap" style="display:none;margin-top:10px;">
+                        <div style="height:3px;background:#1a1a3a;border-radius:2px;overflow:hidden;">
+                            <div id="aie-progress-bar" style="height:100%;background:linear-gradient(90deg,#e94560,#c73652);width:0%;transition:width .4s ease;border-radius:2px;"></div>
+                        </div>
+                    </div>
+
                     <!-- Tipp -->
                     <div style="margin-top:8px;font-size:11px;color:#556;text-align:center;">
                         Ctrl+Enter a gyors generáláshoz
@@ -159,7 +166,6 @@
         const handle = document.getElementById('aie-panel-header');
         if (panel && handle) makeDraggable(panel, handle);
 
-        // Textarea focus style
         $(document).on('focus', '#aie-prompt', function () {
             $(this).css('border-color', '#e94560');
         }).on('blur', '#aie-prompt', function () {
@@ -184,7 +190,7 @@
         });
     }
 
-    // ── AI generálás ──────────────────────────────────────────────────────────
+    // ── AI generálás (async + polling) ───────────────────────────────────────
 
     function handleGenerate() {
         const prompt = $('#aie-prompt').val().trim();
@@ -199,46 +205,105 @@
             setStatus('❌ Nem található az oldal ID. Mentsd el az oldalt először!', '#e74c3c');
             return;
         }
-        if (!window.AIEData || !AIEData.restUrl) {
+        if (!window.AIEData || !AIEData.restBase) {
             setStatus('❌ AIEData hiányzik – újratöltés szükséges.', '#e74c3c');
             return;
         }
 
-        setStatus('🔄 Prémium oldal generálása (15–45 mp)...', '#3498db');
+        setStatus('🔄 Generálás indítása...', '#3498db');
         setLoading(true);
+        setProgress(5);
 
         $.ajax({
-            url:         AIEData.restUrl,
+            url:         AIEData.restBase + '/generate-async',
             method:      'POST',
             beforeSend:  function (xhr) {
                 xhr.setRequestHeader('X-WP-Nonce', AIEData.nonce);
             },
             contentType: 'application/json',
             data:        JSON.stringify({ post_id: postId, prompt: prompt, mode: mode }),
-            timeout:     180000,
+            timeout:     15000,
             success:     function (response) {
-                if (response.success) {
-                    setStatus('✅ Kész! Az oldal betöltése folyamatban...', '#27ae60');
-                    setTimeout(reloadElementorEditor, 1200);
+                if (response && response.job_id) {
+                    setProgress(10);
+                    setStatus('⏳ AI tervezi az oldalt...', '#3498db');
+                    pollJobStatus(response.job_id, 0);
                 } else {
-                    setStatus('❌ ' + (response.message || 'Ismeretlen hiba.'), '#e74c3c');
+                    setStatus('❌ Nem sikerült elindítani a generálást.', '#e74c3c');
+                    setLoading(false);
+                    setProgress(0);
                 }
             },
             error: function (xhr, textStatus, errorThrown) {
                 let msg;
-                if (xhr.responseJSON) {
-                    msg = xhr.responseJSON.message || xhr.responseJSON.code || JSON.stringify(xhr.responseJSON);
+                if (xhr.responseJSON && xhr.responseJSON.message) {
+                    msg = xhr.responseJSON.message;
                 } else if (xhr.responseText && xhr.responseText.length < 300) {
                     msg = xhr.responseText;
                 } else {
                     msg = 'HTTP ' + xhr.status + ' – ' + (errorThrown || textStatus || 'Hálózati hiba');
                 }
                 setStatus('❌ ' + msg, '#e74c3c');
-                console.error('[AIE] Hiba:', xhr.status, textStatus, errorThrown, xhr.responseText ? xhr.responseText.substring(0, 500) : '');
-            },
-            complete: function () {
                 setLoading(false);
+                setProgress(0);
+                console.error('[AIE] Async start error:', xhr.status, textStatus, errorThrown);
+            }
+        });
+    }
+
+    // ── Polling ───────────────────────────────────────────────────────────────
+
+    function pollJobStatus(jobId, attempts) {
+        // Max ~4 perc várakozás (80 × 3s)
+        if (attempts > 80) {
+            setStatus('❌ Időtúllépés – a generálás túl sokáig tartott. Próbáld újra.', '#e74c3c');
+            setLoading(false);
+            setProgress(0);
+            return;
+        }
+
+        // Progress animáció: 10% → 90% a várakozás alatt
+        var progressPct = Math.min(10 + attempts * 1.1, 88);
+        setProgress(progressPct);
+
+        $.ajax({
+            url: AIEData.restBase + '/job-status/' + jobId,
+            method: 'GET',
+            beforeSend: function (xhr) {
+                xhr.setRequestHeader('X-WP-Nonce', AIEData.nonce);
             },
+            timeout: 8000,
+            success: function (res) {
+                if (res.status === 'done') {
+                    setProgress(100);
+                    setStatus('✅ Kész! Az oldal betöltése folyamatban...', '#27ae60');
+                    setLoading(false);
+                    setTimeout(function () {
+                        setProgress(0);
+                        reloadElementorEditor();
+                    }, 1200);
+
+                } else if (res.status === 'error') {
+                    setStatus('❌ ' + (res.message || 'Ismeretlen hiba.'), '#e74c3c');
+                    setLoading(false);
+                    setProgress(0);
+
+                } else {
+                    // pending vagy processing – mutasd a szerver üzenetét ha van
+                    if (res.message && res.message.length > 3) {
+                        setStatus('⏳ ' + res.message, '#3498db');
+                    }
+                    setTimeout(function () {
+                        pollJobStatus(jobId, attempts + 1);
+                    }, 3000);
+                }
+            },
+            error: function () {
+                // Hálózati hiba – újrapróbál
+                setTimeout(function () {
+                    pollJobStatus(jobId, attempts + 1);
+                }, 4000);
+            }
         });
     }
 
@@ -252,6 +317,18 @@
         const $btn = $('#aie-generate');
         $btn.prop('disabled', isLoading).css('opacity', isLoading ? 0.55 : 1);
         $btn.html(isLoading ? '⏳ Generálás folyamatban...' : '✨ Generálás');
+    }
+
+    function setProgress(pct) {
+        const $wrap = $('#aie-progress-wrap');
+        const $bar  = $('#aie-progress-bar');
+        if (pct <= 0) {
+            $wrap.hide();
+            $bar.css('width', '0%');
+        } else {
+            $wrap.show();
+            $bar.css('width', pct + '%');
+        }
     }
 
     function getPostIdFromURL() {
